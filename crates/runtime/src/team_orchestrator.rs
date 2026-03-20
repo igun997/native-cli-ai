@@ -255,12 +255,18 @@ Each role has different capabilities:
 PLANNING GUIDELINES:
 - For complex tasks, create a FULL PIPELINE of agents across multiple stages.
 - Think about the complete workflow: research/design → implement → review/test.
-- Example: "create a landing page" should have at minimum:
-  Stage 1: researcher (research best practices, gather inspiration, define structure)
-  Stage 2: implementer (build the page based on research findings)
-  Stage 3: reviewer + tester (review code quality, test the result)
-- Do NOT use just one agent for tasks that naturally involve multiple phases.
+- SPLIT HEAVY TASKS into smaller focused agents. Do NOT give one agent too much work.
+  Bad: one implementer that creates 10 files
+  Good: split into implementer-html (creates HTML structure), implementer-css (creates styles), implementer-js (adds interactivity)
+- Example: "create a landing page" should have:
+  Stage 1: researcher (research best practices, define page structure and content plan)
+  Stage 2: implementer-setup (create project scaffolding, package.json, config files)
+  Stage 3: implementer-html (create the HTML page with content)
+  Stage 4: implementer-css (add styling and responsive design)
+  Stage 5: reviewer (review all files for quality)
+- Each agent should have a SMALL, FOCUSED task that produces specific deliverables.
 - Each stage builds on the output of the previous one via depends_on.
+- Do NOT use just one agent for tasks that naturally involve multiple phases.
 
 Rules:
 1. Use the create_team_plan tool to define your plan.
@@ -708,17 +714,19 @@ impl TeamOrchestratorDriver {
                             .output();
                         match output {
                             Ok(o) if o.status.success() => {
-                                tracing::info!("Merged {agent_name} branch {branch} into workspace");
+                                self.emit_event("orchestrator", AgentEvent::Checkpoint {
+                                    phase: format!("Merged {agent_name} into workspace"),
+                                    detail: branch.clone(),
+                                    turn: 0,
+                                }).await;
                             }
                             Ok(o) => {
                                 let stderr = String::from_utf8_lossy(&o.stderr);
-                                // If conflict, abort and try checkout approach
                                 if stderr.contains("CONFLICT") {
                                     let _ = Command::new("git")
                                         .args(["merge", "--abort"])
                                         .current_dir(&self.workspace_root)
                                         .output();
-                                    // Checkout files directly
                                     let _ = Command::new("git")
                                         .args(["checkout", branch, "--", "."])
                                         .current_dir(&self.workspace_root)
@@ -732,11 +740,21 @@ impl TeamOrchestratorDriver {
                                                "commit", "-m", &format!("Apply agent {agent_name} changes")])
                                         .current_dir(&self.workspace_root)
                                         .output();
+                                    self.emit_event("orchestrator", AgentEvent::Checkpoint {
+                                        phase: format!("Resolved conflicts for {agent_name}"),
+                                        detail: stderr.trim().to_string(),
+                                        turn: 0,
+                                    }).await;
+                                } else {
+                                    self.emit_event("orchestrator", AgentEvent::Error {
+                                        message: format!("Merge of {agent_name} failed: {}", stderr.trim()),
+                                    }).await;
                                 }
-                                tracing::warn!("Merge of {agent_name} had issues: {}", stderr.trim());
                             }
                             Err(e) => {
-                                tracing::warn!("Failed to merge {agent_name}: {e}");
+                                self.emit_event("orchestrator", AgentEvent::Error {
+                                    message: format!("Failed to merge {agent_name}: {e}"),
+                                }).await;
                             }
                         }
                     }
