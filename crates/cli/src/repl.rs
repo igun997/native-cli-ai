@@ -191,6 +191,17 @@ impl Repl {
     pub async fn run(&mut self) -> anyhow::Result<()> {
         let mut editor = self.build_editor()?;
 
+        // Start orchestration consumer so orchestrate_team tool works in REPL
+        let _orch_task = if let Some(orch_rx) = self.runtime.take_orch_rx() {
+            Some(nca_runtime::supervisor::orchestration_consumer(
+                orch_rx,
+                self.runtime.config().clone(),
+                self.runtime.workspace_root().to_path_buf(),
+            ))
+        } else {
+            None
+        };
+
         if self.run_mode {
             self.print_banner();
         }
@@ -1125,6 +1136,17 @@ impl Repl {
 
     /// Full-screen TUI: transcript + streaming + composer (default on TTY).
     pub async fn run_with_tui(&mut self) -> anyhow::Result<()> {
+        // Start orchestration consumer so orchestrate_team tool works in TUI
+        let _orch_task = if let Some(orch_rx) = self.runtime.take_orch_rx() {
+            Some(nca_runtime::supervisor::orchestration_consumer(
+                orch_rx,
+                self.runtime.config().clone(),
+                self.runtime.workspace_root().to_path_buf(),
+            ))
+        } else {
+            None
+        };
+
         let session_id = self.runtime.session_id().to_string();
         let model = self.runtime.model().to_string();
         let perm = format!("{:?}", self.runtime.permission_mode());
