@@ -333,6 +333,10 @@ impl TeamOrchestratorDriver {
             let reports = self.run_stage(stage, &stage_reports).await;
             stage_reports.extend(reports);
 
+            // After each stage, merge completed agent branches into workspace
+            // so the next stage's agents can see the files
+            self.merge_stage_into_workspace(stage).await;
+
             // Drain any pending commands between stages
             while let Ok(cmd) = self.command_rx.try_recv() {
                 self.process_command(cmd).await;
@@ -678,6 +682,58 @@ impl TeamOrchestratorDriver {
         Ok(result.branch)
     }
 
+    /// After a stage completes, merge completed agent worktree branches into the
+    /// main workspace so the next stage's agents can see the files.
+    async fn merge_stage_into_workspace(&self, stage: &ExecutionStage) {
+        use std::process::Command;
+        for agent_name in &stage.parallel {
+            if let Some(worker) = self.workers.get(agent_name) {
+                if worker.status == WorkerStatus::Completed {
+                    if let Some(branch) = &worker.branch {
+                        let output = Command::new("git")
+                            .args(["merge", branch, "--no-ff", "-m"])
+                            .arg(format!("Merge stage agent {agent_name}"))
+                            .current_dir(&self.workspace_root)
+                            .output();
+                        match output {
+                            Ok(o) if o.status.success() => {
+                                tracing::info!("Merged {agent_name} branch {branch} into workspace");
+                            }
+                            Ok(o) => {
+                                let stderr = String::from_utf8_lossy(&o.stderr);
+                                // If conflict, abort and try checkout approach
+                                if stderr.contains("CONFLICT") {
+                                    let _ = Command::new("git")
+                                        .args(["merge", "--abort"])
+                                        .current_dir(&self.workspace_root)
+                                        .output();
+                                    // Checkout files directly
+                                    let _ = Command::new("git")
+                                        .args(["checkout", branch, "--", "."])
+                                        .current_dir(&self.workspace_root)
+                                        .output();
+                                    let _ = Command::new("git")
+                                        .args(["add", "-A"])
+                                        .current_dir(&self.workspace_root)
+                                        .output();
+                                    let _ = Command::new("git")
+                                        .args(["-c", "user.name=nca", "-c", "user.email=nca@localhost",
+                                               "commit", "-m", &format!("Apply agent {agent_name} changes")])
+                                        .current_dir(&self.workspace_root)
+                                        .output();
+                                }
+                                tracing::warn!("Merge of {agent_name} had issues: {}", stderr.trim());
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to merge {agent_name}: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Apply the merged orchestration branch back to the user's working tree.
     async fn apply_to_working_tree(&self, branch: &str) -> Result<(), String> {
         use std::process::Command;
@@ -1000,11 +1056,22 @@ async fn run_worker_agent(
         None
     };
 
-    let result = supervisor.run_turn(&full_prompt).await;
-    let report = match result {
+    // Run the agent — may take multiple turns to complete
+    let report = match supervisor.run_turn(&full_prompt).await {
         Ok(output) => Some(output),
         Err(e) => Some(format!("Agent error: {e}")),
     };
+
+    // Commit any changes the agent made to the worktree
+    let _ = std::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(&worktree_info.worktree_path)
+        .output();
+    let _ = std::process::Command::new("git")
+        .args(["-c", "user.name=nca", "-c", "user.email=nca@localhost",
+               "commit", "-m", &format!("Agent {} work", assignment.name)])
+        .current_dir(&worktree_info.worktree_path)
+        .output();
 
     supervisor.finish(EndReason::Completed).await;
 
