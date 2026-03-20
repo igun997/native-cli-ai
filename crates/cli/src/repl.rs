@@ -512,6 +512,8 @@ impl Repl {
                        /attach                    Show current attach target\n\
                        /config                    Show effective runtime config\n\
                        /doctor                    Run MiniMax config checks\n\
+                       /orchestrate <task>        Run multi-agent orchestration\n\
+                       /roles [list|show <name>]  Manage agent roles\n\
                        /sessions                  List local session IDs\n\
                        /permissions [mode]        Show or set permission mode\n\
                        /permission-bypass [on|off|toggle]  Quick bypass toggle (default: toggle)\n\
@@ -920,6 +922,130 @@ impl Repl {
                     out.eprintln(&format!("failed to list sessions: {error}"));
                 }
             },
+            "/orchestrate" => {
+                if rest.is_empty() {
+                    out.eprintln("Usage: /orchestrate <task description> [--agents \"hints\"]");
+                } else {
+                    // Parse optional --agents flag
+                    let (prompt, agents) = if let Some(idx) = rest.find("--agents") {
+                        let prompt = rest[..idx].trim().to_string();
+                        let agents_str = rest[idx + 8..].trim().trim_matches('"').to_string();
+                        (prompt, Some(agents_str))
+                    } else {
+                        (rest.to_string(), None)
+                    };
+
+                    out.println(&format!("Starting multi-agent orchestration..."));
+                    out.println(&format!("Task: {prompt}"));
+                    if let Some(ref hints) = agents {
+                        out.println(&format!("Agents: {hints}"));
+                    }
+
+                    let config = self.runtime.config().clone();
+                    let workspace = self.runtime.workspace_root().to_path_buf();
+
+                    match nca_runtime::team_orchestrator::TeamOrchestrator::start(
+                        config, workspace, prompt, agents,
+                    ).await {
+                        Ok(handle) => {
+                            // Stream events live into TUI or stdout
+                            let mut event_rx = handle.subscribe();
+                            let tui_state_for_events: Option<Arc<Mutex<TuiSessionState>>> =
+                                if let ReplOutput::Tui(st) = &out {
+                                    Some((*st).clone())
+                                } else {
+                                    None
+                                };
+                            let event_task = tokio::spawn(async move {
+                                while let Ok(event) = event_rx.recv().await {
+                                    let ts = event.timestamp.format("%H:%M:%S");
+                                    let line = format!("[{ts}] [{}] {:?}", event.source_agent, event.event);
+                                    if let Some(ref st) = tui_state_for_events {
+                                        if let Ok(mut g) = st.lock() {
+                                            g.blocks.push(DisplayBlock::System(line));
+                                        }
+                                    } else {
+                                        println!("{line}");
+                                    }
+                                }
+                            });
+
+                            match handle.wait().await {
+                                Ok(result) => {
+                                    event_task.abort();
+                                    out.println("\n--- Orchestration Complete ---");
+                                    out.println(&format!("Outcome: {:?}", result.outcome));
+                                    out.println(&format!("Cost: ${:.4}", result.cost.total_usd));
+                                    if let Some(branch) = &result.merge_branch {
+                                        out.println(&format!("Merge branch: {branch}"));
+                                    }
+                                    out.println("\nAgent Reports:");
+                                    for report in &result.agent_reports {
+                                        out.println(&format!(
+                                            "  {} ({}): {:?}",
+                                            report.name, report.role, report.status
+                                        ));
+                                        if let Some(r) = &report.completion_report {
+                                            let preview = if r.len() > 500 { &r[..500] } else { r };
+                                            out.println(&format!("    {}", preview.replace('\n', "\n    ")));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    event_task.abort();
+                                    out.eprintln(&format!("Orchestration failed: {e}"));
+                                }
+                            }
+                        }
+                        Err(e) => out.eprintln(&format!("Failed to start orchestration: {e}")),
+                    }
+                }
+            }
+            "/roles" => {
+                let sub = parts.next().unwrap_or("list");
+                match sub {
+                    "list" | "" => {
+                        let catalog = nca_runtime::role_catalog::RoleCatalog::load(
+                            self.runtime.workspace_root(),
+                        );
+                        out.println("Available roles:\n");
+                        for role in catalog.list() {
+                            out.println(&format!(
+                                "  {} — {} (mode: {:?}, turns: {}, tools: {})",
+                                role.name, role.description,
+                                role.permission_mode, role.max_turns, role.max_tool_calls
+                            ));
+                        }
+                    }
+                    "show" => {
+                        let name = parts.next().unwrap_or("");
+                        if name.is_empty() {
+                            out.eprintln("Usage: /roles show <name>");
+                        } else {
+                            let catalog = nca_runtime::role_catalog::RoleCatalog::load(
+                                self.runtime.workspace_root(),
+                            );
+                            match catalog.get(name) {
+                                Some(role) => {
+                                    out.println(&format!("Role: {}", role.name));
+                                    out.println(&format!("Description: {}", role.description));
+                                    out.println(&format!("Mode: {:?}", role.permission_mode));
+                                    out.println(&format!("Max turns: {}", role.max_turns));
+                                    out.println(&format!("Max tool calls: {}", role.max_tool_calls));
+                                    if !role.allowed_tools.is_empty() {
+                                        out.println(&format!("Allowed: {}", role.allowed_tools.join(", ")));
+                                    }
+                                    if !role.denied_tools.is_empty() {
+                                        out.println(&format!("Denied: {}", role.denied_tools.join(", ")));
+                                    }
+                                }
+                                None => out.eprintln(&format!("Role '{name}' not found")),
+                            }
+                        }
+                    }
+                    other => out.eprintln(&format!("Unknown roles subcommand: {other}. Use: list, show")),
+                }
+            }
             _ => {
                 if command.starts_with('/') {
                     if self

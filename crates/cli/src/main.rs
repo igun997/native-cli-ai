@@ -1,15 +1,16 @@
 mod approval_prompt;
 mod approval_prompts;
+mod orchestrate;
 mod prompt;
 mod repl;
+mod roles_cmd;
 mod runner;
 mod slash_commands;
 mod stream;
 mod tui;
 
 use crate::approval_prompts::InteractiveIpcApprovalHandler;
-use clap::CommandFactory;
-use clap::Parser;
+use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::aot::generate;
 use nca_common::config::{NcaConfig, PermissionMode, ProviderKind};
 use nca_common::event::EndReason;
@@ -221,6 +222,21 @@ enum Command {
         #[arg(value_enum, default_value_t = ClapShell::Bash)]
         shell: ClapShell,
     },
+    /// Multi-agent orchestration
+    Orchestrate {
+        /// Task description for the team
+        prompt: String,
+        /// Agent hints (role names or natural language, comma-separated)
+        #[arg(long)]
+        agents: Option<String>,
+        #[command(subcommand)]
+        action: Option<OrchestrateAction>,
+    },
+    /// Manage agent roles
+    Roles {
+        #[command(subcommand)]
+        action: RolesAction,
+    },
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -257,6 +273,45 @@ enum SessionStatusFilter {
     Completed,
     Cancelled,
     Failed,
+}
+
+#[derive(Subcommand, Debug)]
+enum OrchestrateAction {
+    Status { id: String },
+    Attach { id: String },
+    Logs {
+        id: String,
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    Pause {
+        id: String,
+        #[arg(long)]
+        agent: String,
+    },
+    Resume {
+        id: String,
+        #[arg(long)]
+        agent: String,
+    },
+    Redirect {
+        id: String,
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        message: String,
+    },
+    Cancel {
+        id: String,
+        #[arg(long)]
+        agent: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum RolesAction {
+    List,
+    Show { name: String },
 }
 
 impl From<CliPermissionMode> for PermissionMode {
@@ -475,6 +530,21 @@ async fn try_main() -> anyhow::Result<()> {
         Some(Command::Completion { shell }) => {
             generate_shell_completion(shell);
         }
+        Some(Command::Orchestrate {
+            prompt,
+            agents,
+            action,
+        }) => {
+            if let Some(_action) = action {
+                eprintln!("Orchestration subcommands not yet implemented.");
+            } else {
+                orchestrate::run_orchestrate(config, workspace_root, prompt, agents).await?;
+            }
+        }
+        Some(Command::Roles { action }) => match action {
+            RolesAction::List => roles_cmd::run_roles_list(&workspace_root),
+            RolesAction::Show { name } => roles_cmd::run_roles_show(&workspace_root, &name),
+        },
         None => {
             if let Some(prompt) = cli.prompt.as_deref() {
                 if let Some(mode) = cli.permission_mode {

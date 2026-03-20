@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod bridge;
+pub mod orchestration;
 pub mod state;
 
 pub use app::{TuiCmd, run_blocking};

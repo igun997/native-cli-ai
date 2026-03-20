@@ -1,10 +1,15 @@
 pub mod bash_tool;
 pub mod ipc;
 pub mod memory_store;
+pub mod orchestrator_store;
 pub mod process;
 pub mod pty;
+pub mod role_catalog;
 pub mod service;
 pub mod session_store;
 pub mod supervisor;
+pub mod team_merge;
+pub mod team_orchestrator;
 pub mod tmux;
+pub mod workspace_registry;
 pub mod worktree;

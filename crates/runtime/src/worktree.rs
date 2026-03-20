@@ -28,6 +28,10 @@ pub enum WorktreeError {
     NotGitRepo(String),
     #[error("IO error: {0}")]
     Io(String),
+    #[error("worktree creation failed: {0}")]
+    CreateFailed(String),
+    #[error("merge failed: {0}")]
+    MergeFailed(String),
 }
 
 impl WorktreeManager {
@@ -45,6 +49,45 @@ impl WorktreeManager {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
+    }
+
+    /// Ensure the workspace is a git repository. If not, initialize one.
+    pub fn ensure_git_repo(&self) -> Result<(), WorktreeError> {
+        if self.is_git_repo() {
+            return Ok(());
+        }
+
+        let output = Command::new("git")
+            .args(["init"])
+            .current_dir(&self.repo_root)
+            .output()
+            .map_err(|e| WorktreeError::Io(e.to_string()))?;
+
+        if !output.status.success() {
+            return Err(WorktreeError::GitFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+
+        let _ = Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&self.repo_root)
+            .output();
+
+        let output = Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "chore: initialize repository for nca"])
+            .current_dir(&self.repo_root)
+            .output()
+            .map_err(|e| WorktreeError::Io(e.to_string()))?;
+
+        if !output.status.success() {
+            tracing::warn!(
+                "git init succeeded but initial commit failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        Ok(())
     }
 
     /// Get the current branch name.
@@ -67,11 +110,8 @@ impl WorktreeManager {
     /// The worktree is created at `<repo>/.nca/worktrees/<session_id>` with
     /// a new branch `nca/<session_id>` based on the current HEAD.
     pub fn create_worktree(&self, session_id: &str) -> Result<WorktreeInfo, WorktreeError> {
-        if !self.is_git_repo() {
-            return Err(WorktreeError::NotGitRepo(
-                self.repo_root.display().to_string(),
-            ));
-        }
+        // Auto-initialize git if not present
+        self.ensure_git_repo()?;
 
         let base_branch = self.current_branch()?;
         let branch_name = format!("nca/{session_id}");
@@ -297,6 +337,96 @@ impl WorktreeManager {
         }
 
         Ok(())
+    }
+
+    /// Create a merge worktree for combining multiple agent branches.
+    /// Path: .nca/worktrees/merge-{orch_id}/
+    /// Branch: nca/orch-{orch_id}
+    pub fn create_merge_worktree(&self, orch_id: &str) -> Result<WorktreeInfo, WorktreeError> {
+        let worktree_path = self
+            .repo_root
+            .join(".nca")
+            .join("worktrees")
+            .join(format!("merge-{orch_id}"));
+        let branch_name = format!("nca/orch-{orch_id}");
+
+        if worktree_path.exists() {
+            std::fs::remove_dir_all(&worktree_path)
+                .map_err(|e| WorktreeError::CreateFailed(e.to_string()))?;
+        }
+
+        if let Some(parent) = worktree_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| WorktreeError::CreateFailed(e.to_string()))?;
+        }
+
+        let base = self
+            .current_branch()
+            .unwrap_or_else(|_| "HEAD".to_string());
+
+        let output = Command::new("git")
+            .args(["worktree", "add", "-b", &branch_name])
+            .arg(&worktree_path)
+            .arg("HEAD")
+            .current_dir(&self.repo_root)
+            .output()
+            .map_err(|e| WorktreeError::CreateFailed(e.to_string()))?;
+
+        if !output.status.success() {
+            return Err(WorktreeError::CreateFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+
+        Ok(WorktreeInfo {
+            worktree_path,
+            branch_name,
+            base_branch: base,
+            session_id: format!("merge-{orch_id}"),
+            created_at: chrono::Utc::now(),
+        })
+    }
+
+    /// Merge a branch into a worktree (used for combining agent work).
+    /// Returns Ok(true) if merged cleanly, Ok(false) if conflicts exist.
+    pub fn merge_branch_into_worktree(
+        &self,
+        merge_worktree: &Path,
+        branch: &str,
+    ) -> Result<bool, WorktreeError> {
+        let output = Command::new("git")
+            .args(["merge", "--no-ff", branch, "-m"])
+            .arg(format!("Merge agent branch {branch}"))
+            .current_dir(merge_worktree)
+            .output()
+            .map_err(|e| WorktreeError::MergeFailed(e.to_string()))?;
+
+        if output.status.success() {
+            return Ok(true);
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("CONFLICT") || stderr.contains("Automatic merge failed") {
+            Ok(false)
+        } else {
+            Err(WorktreeError::MergeFailed(stderr.to_string()))
+        }
+    }
+
+    /// List files with merge conflicts in a worktree.
+    pub fn conflict_files(&self, worktree_path: &Path) -> Vec<String> {
+        let output = Command::new("git")
+            .args(["diff", "--name-only", "--diff-filter=U"])
+            .current_dir(worktree_path)
+            .output();
+
+        match output {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.to_string())
+                .collect(),
+            _ => vec![],
+        }
     }
 
     /// Prune stale worktrees that no longer have active sessions.
