@@ -197,6 +197,7 @@ impl Repl {
                 orch_rx,
                 self.runtime.config().clone(),
                 self.runtime.workspace_root().to_path_buf(),
+                None,
             ))
         } else {
             None
@@ -1142,6 +1143,7 @@ impl Repl {
                 orch_rx,
                 self.runtime.config().clone(),
                 self.runtime.workspace_root().to_path_buf(),
+                None,
             ))
         } else {
             None

@@ -716,6 +716,7 @@ async fn run_one_shot(
                 orch_rx,
                 config.clone(),
                 runtime.workspace_root().to_path_buf(),
+                None,
             ))
         } else {
             None

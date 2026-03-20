@@ -919,6 +919,7 @@ pub fn orchestration_consumer(
     mut orch_rx: mpsc::Receiver<OrchestrationRequest>,
     config: NcaConfig,
     workspace_root: PathBuf,
+    parent_event_tx: Option<mpsc::Sender<AgentEvent>>,
 ) -> tokio::task::JoinHandle<()> {
     use nca_core::tools::orchestrate_team::{AgentReportSummary, OrchestrationResponse};
 
@@ -926,6 +927,7 @@ pub fn orchestration_consumer(
         while let Some(req) = orch_rx.recv().await {
             let config = config.clone();
             let workspace = workspace_root.clone();
+            let parent_tx = parent_event_tx.clone();
             tokio::spawn(async move {
                 let handle = match crate::team_orchestrator::TeamOrchestrator::start(
                     config,
@@ -950,18 +952,27 @@ pub fn orchestration_consumer(
                     }
                 };
 
-                // Collect events in the background
+                // Forward orchestration events to parent TUI AND collect for final report
                 let mut event_rx = handle.subscribe();
                 let event_log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
                 let log_clone = event_log.clone();
                 let event_task = tokio::spawn(async move {
                     while let Ok(event) = event_rx.recv().await {
                         let ts = event.timestamp.format("%H:%M:%S");
+                        let line = format!(
+                            "[{ts}] [{}] {:?}",
+                            event.source_agent, event.event
+                        );
                         if let Ok(mut v) = log_clone.lock() {
-                            v.push(format!(
-                                "[{ts}] [{}] {:?}",
-                                event.source_agent, event.event
-                            ));
+                            v.push(line.clone());
+                        }
+                        // Forward key events to parent so TUI shows live progress
+                        if let Some(ref tx) = parent_tx {
+                            let _ = tx.send(AgentEvent::Checkpoint {
+                                phase: format!("[orchestration] {}", event.source_agent),
+                                detail: line,
+                                turn: 0,
+                            }).await;
                         }
                     }
                 });

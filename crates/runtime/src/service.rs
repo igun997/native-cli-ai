@@ -163,6 +163,7 @@ async fn run_service_session_with_startup(
             orch_rx,
             request.config.clone(),
             info.workspace_root.clone(),
+            None,
         ))
     } else {
         None

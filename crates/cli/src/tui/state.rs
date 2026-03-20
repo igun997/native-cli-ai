@@ -272,7 +272,14 @@ impl TuiSessionState {
             AgentEvent::Error { message } => {
                 self.blocks.push(DisplayBlock::ErrorLine(message.clone()));
             }
-            AgentEvent::Checkpoint { .. } => {}
+            AgentEvent::Checkpoint { phase, detail, .. } => {
+                let msg = if detail.is_empty() {
+                    phase.clone()
+                } else {
+                    format!("{phase}: {}", truncate(detail, 120))
+                };
+                self.blocks.push(DisplayBlock::System(msg));
+            }
             AgentEvent::ChildSessionSpawned {
                 child_session_id,
                 task,
