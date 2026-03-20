@@ -51,40 +51,68 @@ impl WorktreeManager {
             .unwrap_or(false)
     }
 
-    /// Ensure the workspace is a git repository. If not, initialize one.
+    /// Check if HEAD points to a valid commit.
+    fn has_valid_head(&self) -> bool {
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&self.repo_root)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Ensure the workspace is a git repository with at least one commit.
+    /// If not, initialize and create an initial commit.
     pub fn ensure_git_repo(&self) -> Result<(), WorktreeError> {
-        if self.is_git_repo() {
-            return Ok(());
+        // Step 1: init if needed
+        if !self.is_git_repo() {
+            let output = Command::new("git")
+                .args(["init"])
+                .current_dir(&self.repo_root)
+                .output()
+                .map_err(|e| WorktreeError::Io(e.to_string()))?;
+
+            if !output.status.success() {
+                return Err(WorktreeError::GitFailed(
+                    String::from_utf8_lossy(&output.stderr).to_string(),
+                ));
+            }
         }
 
-        let output = Command::new("git")
-            .args(["init"])
-            .current_dir(&self.repo_root)
-            .output()
-            .map_err(|e| WorktreeError::Io(e.to_string()))?;
+        // Step 2: ensure HEAD is valid (has at least one commit)
+        if !self.has_valid_head() {
+            // Stage all files
+            let _ = Command::new("git")
+                .args(["add", "-A"])
+                .current_dir(&self.repo_root)
+                .output();
 
-        if !output.status.success() {
-            return Err(WorktreeError::GitFailed(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
+            // Try commit with user's git config first
+            let output = Command::new("git")
+                .args(["commit", "--allow-empty", "-m", "chore: initialize repository for nca"])
+                .current_dir(&self.repo_root)
+                .output()
+                .map_err(|e| WorktreeError::Io(e.to_string()))?;
 
-        let _ = Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(&self.repo_root)
-            .output();
+            if !output.status.success() {
+                // Likely no git user configured — use a fallback
+                let output = Command::new("git")
+                    .args([
+                        "-c", "user.name=nca",
+                        "-c", "user.email=nca@localhost",
+                        "commit", "--allow-empty", "-m", "chore: initialize repository for nca",
+                    ])
+                    .current_dir(&self.repo_root)
+                    .output()
+                    .map_err(|e| WorktreeError::Io(e.to_string()))?;
 
-        let output = Command::new("git")
-            .args(["commit", "--allow-empty", "-m", "chore: initialize repository for nca"])
-            .current_dir(&self.repo_root)
-            .output()
-            .map_err(|e| WorktreeError::Io(e.to_string()))?;
-
-        if !output.status.success() {
-            tracing::warn!(
-                "git init succeeded but initial commit failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+                if !output.status.success() {
+                    return Err(WorktreeError::GitFailed(format!(
+                        "Failed to create initial commit: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    )));
+                }
+            }
         }
 
         Ok(())
