@@ -339,9 +339,29 @@ impl TeamOrchestratorDriver {
             }
         }
 
-        // Phase 3: Merge — combine worktree branches
+        // Phase 3: Merge — combine worktree branches and apply to working tree
         self.set_phase(TeamPhase::Merge).await;
         let merge_result = self.merge_worktrees().await;
+
+        // Apply merged changes back to user's working tree
+        if let Ok(ref branch) = merge_result {
+            match self.apply_to_working_tree(branch).await {
+                Ok(_) => {
+                    self.emit_event("orchestrator", AgentEvent::Checkpoint {
+                        phase: "Changes applied to working tree".to_string(),
+                        detail: branch.clone(),
+                        turn: 0,
+                    }).await;
+                }
+                Err(e) => {
+                    self.emit_event("orchestrator", AgentEvent::Checkpoint {
+                        phase: format!("Failed to apply to working tree: {e}"),
+                        detail: format!("Changes remain on branch: {branch}"),
+                        turn: 0,
+                    }).await;
+                }
+            }
+        }
 
         let outcome = if self
             .workers
@@ -658,6 +678,69 @@ impl TeamOrchestratorDriver {
         Ok(result.branch)
     }
 
+    /// Apply the merged orchestration branch back to the user's working tree.
+    async fn apply_to_working_tree(&self, branch: &str) -> Result<(), String> {
+        use std::process::Command;
+
+        // Merge the orchestration branch into the current branch in the user's working tree
+        let output = Command::new("git")
+            .args(["merge", branch, "--no-ff", "-m"])
+            .arg(format!("Merge orchestration {}", self.id))
+            .current_dir(&self.workspace_root)
+            .output()
+            .map_err(|e| format!("git merge failed: {e}"))?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // If merge conflicts, try a simpler approach: checkout the files directly
+        if stderr.contains("CONFLICT") || stderr.contains("Automatic merge failed") {
+            // Abort the failed merge
+            let _ = Command::new("git")
+                .args(["merge", "--abort"])
+                .current_dir(&self.workspace_root)
+                .output();
+
+            // Fall back to checking out files from the orch branch
+            let output = Command::new("git")
+                .args(["diff", "--name-only", &format!("HEAD...{branch}")])
+                .current_dir(&self.workspace_root)
+                .output()
+                .map_err(|e| format!("git diff failed: {e}"))?;
+
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let files: Vec<&str> = stdout.lines().collect();
+
+                for file in &files {
+                    let _ = Command::new("git")
+                        .args(["checkout", branch, "--", file])
+                        .current_dir(&self.workspace_root)
+                        .output();
+                }
+
+                // Stage and commit
+                let _ = Command::new("git")
+                    .args(["add", "-A"])
+                    .current_dir(&self.workspace_root)
+                    .output();
+
+                let _ = Command::new("git")
+                    .args(["commit", "-m"])
+                    .arg(format!("Apply orchestration {} changes", self.id))
+                    .current_dir(&self.workspace_root)
+                    .output();
+
+                return Ok(());
+            }
+        }
+
+        Err(format!("git merge failed: {}", stderr.trim()))
+    }
+
     // ── Command processing ───────────────────────────────────────────────
 
     async fn process_command(&mut self, cmd: TeamCommand) {
@@ -845,9 +928,12 @@ async fn run_worker_agent(
     }
     let full_prompt = context_parts.join("\n\n");
 
-    // Configure supervisor with role-appropriate permissions
+    // Configure supervisor permissions: respect user's bypass if set, otherwise use role's mode
     let mut worker_config = config.clone();
-    worker_config.permissions.mode = assignment.role.permission_mode;
+    if worker_config.permissions.mode != nca_common::config::PermissionMode::BypassPermissions {
+        worker_config.permissions.mode = assignment.role.permission_mode;
+    }
+    // Orchestrated workers always run non-interactively
 
     let orchestration_context = OrchestrationContext {
         orchestrator: Some("nca-team".to_string()),
