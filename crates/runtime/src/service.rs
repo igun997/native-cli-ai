@@ -1,6 +1,6 @@
 use crate::supervisor::{
     SessionControlCommand, Supervisor, SupervisorConfig, spawn_command_consumer_with_store,
-    spawn_subagent_consumer,
+    spawn_subagent_consumer, orchestration_consumer,
 };
 use nca_common::config::NcaConfig;
 use nca_common::event::{AgentEvent, EndReason, EventEnvelope};
@@ -158,6 +158,16 @@ async fn run_service_session_with_startup(
         None
     };
 
+    let orch_task = if let Some(orch_rx) = handle.take_orch_rx() {
+        Some(orchestration_consumer(
+            orch_rx,
+            request.config.clone(),
+            info.workspace_root.clone(),
+        ))
+    } else {
+        None
+    };
+
     let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let (control_tx, mut control_rx) =
         tokio::sync::mpsc::unbounded_channel::<SessionControlCommand>();
@@ -243,6 +253,9 @@ async fn run_service_session_with_startup(
         task.abort();
     }
     if let Some(task) = subagent_task {
+        task.abort();
+    }
+    if let Some(task) = orch_task {
         task.abort();
     }
     Ok(())

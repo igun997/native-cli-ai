@@ -12,6 +12,7 @@ pub mod git;
 pub mod list_directory;
 pub mod mcp;
 pub mod move_path;
+pub mod orchestrate_team;
 pub mod rename_path;
 pub mod run_validation;
 pub mod search;

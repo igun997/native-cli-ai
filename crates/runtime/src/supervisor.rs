@@ -17,6 +17,7 @@ use nca_core::provider::factory::build_provider;
 use nca_core::tools::AskQuestionTool;
 use nca_core::tools::ToolRegistry;
 use nca_core::tools::mcp::load_mcp_tools;
+use nca_core::tools::orchestrate_team::{OrchestrateTeamTool, OrchestrationRequest};
 use nca_core::tools::spawn_subagent::{SpawnRequest, SpawnSubagentTool};
 use serde_json::json;
 use std::collections::HashMap;
@@ -44,6 +45,7 @@ pub struct Supervisor {
     approval_pending: Option<Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>>,
     question_pending: Option<Arc<Mutex<HashMap<String, oneshot::Sender<QuestionSelection>>>>>,
     spawn_rx: Option<mpsc::Receiver<SpawnRequest>>,
+    orch_rx: Option<mpsc::Receiver<OrchestrationRequest>>,
     worktree_path: Option<PathBuf>,
     branch: Option<String>,
     base_branch: Option<String>,
@@ -82,6 +84,7 @@ pub struct SupervisorHandle {
     approval_pending: Option<Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>>,
     question_pending: Option<Arc<Mutex<HashMap<String, oneshot::Sender<QuestionSelection>>>>>,
     spawn_rx: Option<mpsc::Receiver<SpawnRequest>>,
+    orch_rx: Option<mpsc::Receiver<OrchestrationRequest>>,
 }
 
 impl SupervisorHandle {
@@ -107,6 +110,10 @@ impl SupervisorHandle {
 
     pub fn take_spawn_rx(&mut self) -> Option<mpsc::Receiver<SpawnRequest>> {
         self.spawn_rx.take()
+    }
+
+    pub fn take_orch_rx(&mut self) -> Option<mpsc::Receiver<OrchestrationRequest>> {
+        self.orch_rx.take()
     }
 }
 
@@ -145,8 +152,10 @@ impl Supervisor {
         tools.register(Box::new(crate::bash_tool::RuntimeBashTool::new(pty)));
 
         let (spawn_tx, spawn_rx) = mpsc::channel::<SpawnRequest>(16);
+        let (orch_tx, orch_rx) = mpsc::channel::<OrchestrationRequest>(4);
         if !cfg.safe_mode {
             tools.register(Box::new(SpawnSubagentTool::new(spawn_tx)));
+            tools.register(Box::new(OrchestrateTeamTool::new(orch_tx)));
         }
 
         let approval_pending: Option<Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>>;
@@ -228,6 +237,7 @@ impl Supervisor {
             approval_pending,
             question_pending: Some(question_pending),
             spawn_rx: Some(spawn_rx),
+            orch_rx: Some(orch_rx),
             worktree_path: None,
             branch: None,
             base_branch: None,
@@ -308,6 +318,7 @@ impl Supervisor {
             approval_pending: self.approval_pending.take(),
             question_pending: self.question_pending.take(),
             spawn_rx: self.spawn_rx.take(),
+            orch_rx: self.orch_rx.take(),
         }
     }
 
@@ -897,6 +908,113 @@ pub fn spawn_subagent_consumer(
                         let _ = req.reply.send(response);
                     }
                 }
+            });
+        }
+    })
+}
+
+/// Spawns a background task that consumes orchestration requests from the
+/// `orchestrate_team` tool and runs a full team orchestration for each one.
+pub fn orchestration_consumer(
+    mut orch_rx: mpsc::Receiver<OrchestrationRequest>,
+    config: NcaConfig,
+    workspace_root: PathBuf,
+) -> tokio::task::JoinHandle<()> {
+    use nca_core::tools::orchestrate_team::{AgentReportSummary, OrchestrationResponse};
+
+    tokio::spawn(async move {
+        while let Some(req) = orch_rx.recv().await {
+            let config = config.clone();
+            let workspace = workspace_root.clone();
+            tokio::spawn(async move {
+                let handle = match crate::team_orchestrator::TeamOrchestrator::start(
+                    config,
+                    workspace,
+                    req.task,
+                    req.agent_hints,
+                )
+                .await
+                {
+                    Ok(h) => h,
+                    Err(e) => {
+                        let _ = req.reply.send(OrchestrationResponse {
+                            orchestration_id: String::new(),
+                            status: "failed".into(),
+                            outcome: format!("Failed to start: {e}"),
+                            agent_reports: vec![],
+                            merge_branch: None,
+                            cost_usd: 0.0,
+                            event_log: vec![],
+                        });
+                        return;
+                    }
+                };
+
+                // Collect events in the background
+                let mut event_rx = handle.subscribe();
+                let event_log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+                let log_clone = event_log.clone();
+                let event_task = tokio::spawn(async move {
+                    while let Ok(event) = event_rx.recv().await {
+                        let ts = event.timestamp.format("%H:%M:%S");
+                        if let Ok(mut v) = log_clone.lock() {
+                            v.push(format!(
+                                "[{ts}] [{}] {:?}",
+                                event.source_agent, event.event
+                            ));
+                        }
+                    }
+                });
+
+                let result = match handle.wait().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        event_task.abort();
+                        let _ = req.reply.send(OrchestrationResponse {
+                            orchestration_id: String::new(),
+                            status: "failed".into(),
+                            outcome: e,
+                            agent_reports: vec![],
+                            merge_branch: None,
+                            cost_usd: 0.0,
+                            event_log: event_log
+                                .lock()
+                                .map(|v| v.clone())
+                                .unwrap_or_default(),
+                        });
+                        return;
+                    }
+                };
+                event_task.abort();
+
+                let agent_reports = result
+                    .agent_reports
+                    .iter()
+                    .map(|r| AgentReportSummary {
+                        name: r.name.clone(),
+                        role: r.role.clone(),
+                        status: format!("{:?}", r.status),
+                        report: r.completion_report.clone(),
+                    })
+                    .collect();
+
+                let _ = req.reply.send(OrchestrationResponse {
+                    orchestration_id: result.orchestration_id.to_string(),
+                    status: if result.outcome == nca_common::team::TeamOutcome::Success {
+                        "completed"
+                    } else {
+                        "partial"
+                    }
+                    .into(),
+                    outcome: format!("{:?}", result.outcome),
+                    agent_reports,
+                    merge_branch: result.merge_branch,
+                    cost_usd: result.cost.total_usd,
+                    event_log: event_log
+                        .lock()
+                        .map(|v| v.clone())
+                        .unwrap_or_default(),
+                });
             });
         }
     })

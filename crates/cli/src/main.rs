@@ -711,6 +711,16 @@ async fn run_one_shot(
             None
         };
 
+        let orch_task = if let Some(orch_rx) = runtime.take_orch_rx() {
+            Some(nca_runtime::supervisor::orchestration_consumer(
+                orch_rx,
+                config.clone(),
+                runtime.workspace_root().to_path_buf(),
+            ))
+        } else {
+            None
+        };
+
         let result = runtime.run_turn(prompt).await;
         let outcome = match result {
             Ok(output) => {
@@ -742,6 +752,9 @@ async fn run_one_shot(
         stream_task.abort();
         if let Some(st) = spawn_task {
             st.abort();
+        }
+        if let Some(ot) = orch_task {
+            ot.abort();
         }
         outcome?;
     }

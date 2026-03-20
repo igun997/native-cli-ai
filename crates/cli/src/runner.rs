@@ -3,6 +3,7 @@ use nca_common::event::{AgentEvent, EndReason, QuestionSelection};
 use nca_common::session::{OrchestrationContext, SessionSnapshot};
 use nca_core::approval::ApprovalHandler;
 use nca_core::provider::ProviderError;
+use nca_core::tools::orchestrate_team::OrchestrationRequest;
 use nca_core::tools::spawn_subagent::SpawnRequest;
 use nca_runtime::ipc::IpcHandle;
 use nca_runtime::supervisor::{Supervisor, SupervisorConfig, SupervisorHandle};
@@ -133,6 +134,10 @@ impl SessionRuntime {
 
     pub fn take_spawn_rx(&mut self) -> Option<mpsc::Receiver<SpawnRequest>> {
         self.handle.as_mut()?.take_spawn_rx()
+    }
+
+    pub fn take_orch_rx(&mut self) -> Option<mpsc::Receiver<OrchestrationRequest>> {
+        self.handle.as_mut()?.take_orch_rx()
     }
 
     pub fn messages(&self) -> &[nca_common::message::Message] {
