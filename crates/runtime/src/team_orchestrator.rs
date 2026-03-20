@@ -1067,10 +1067,26 @@ async fn run_worker_agent(
         None
     };
 
-    // Run the agent — may take multiple turns to complete
+    // Run the agent — may take multiple turns to complete.
+    // Retry once on failure (e.g., blank provider response).
     let report = match supervisor.run_turn(&full_prompt).await {
         Ok(output) => Some(output),
-        Err(e) => Some(format!("Agent error: {e}")),
+        Err(e) => {
+            let err_msg = format!("{e}");
+            // Retry once on empty response or transient errors
+            if err_msg.contains("empty response") || err_msg.contains("blank") {
+                let retry_prompt = format!(
+                    "The previous attempt failed with: {err_msg}\n\n\
+                    Please try again. Your task:\n{full_prompt}"
+                );
+                match supervisor.run_turn(&retry_prompt).await {
+                    Ok(output) => Some(output),
+                    Err(e2) => Some(format!("Agent error after retry: {e2}")),
+                }
+            } else {
+                Some(format!("Agent error: {e}"))
+            }
+        }
     };
 
     // Commit any changes the agent made to the worktree
