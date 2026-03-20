@@ -228,11 +228,21 @@ fn team_plan_tool_definition() -> ToolDefinition {
     }
 }
 
-fn decomposition_system_prompt(available_roles: &[String]) -> String {
+fn decomposition_system_prompt(available_roles: &[String], permission_mode: &str) -> String {
     format!(
         r#"You are a task decomposition agent. Your job is to analyze a user's request and break it down into a multi-agent execution plan.
 
 Available roles: {}
+
+CURRENT PERMISSION MODE: {permission_mode}
+Permission mode determines what agents can do:
+- "bypass-permissions": All agents can use any tool freely. No restrictions.
+- "accept-edits": Agents can read/write files and spawn subagents. Execution (bash) requires approval but agents run non-interactively so it will fail — avoid assigning bash-heavy tasks.
+- "default": Read-only tools are allowed. File edits and execution need approval — agents run non-interactively so these will fail. Only assign read-only tasks (researcher, reviewer, architect) or use needs_workspace=false for pure LLM tasks.
+- "plan": Only read-only tools work. Assign only researcher/architect/reviewer roles, or use needs_workspace=false.
+- "dont-ask": Only read-only tools work. Same as plan mode for agents.
+
+IMPORTANT: If the permission mode is NOT "bypass-permissions", ensure agents have roles that match what they're allowed to do. Do NOT assign "implementer" or "tester" roles in "plan" or "dont-ask" modes — they won't be able to write files.
 
 Each role has different capabilities:
 - researcher: Read-only. Analyzes code, searches the web, produces findings. Cannot modify files. Good for research, planning, and gathering information.
@@ -442,7 +452,8 @@ impl TeamOrchestratorDriver {
         };
 
         let available_roles: Vec<String> = catalog.names().into_iter().map(|s| s.to_string()).collect();
-        let system_prompt = decomposition_system_prompt(&available_roles);
+        let perm_mode = format!("{:?}", self.config.permissions.mode);
+        let system_prompt = decomposition_system_prompt(&available_roles, &perm_mode);
 
         let mut user_prompt = format!("Decompose this task into a multi-agent plan:\n\n{prompt}");
         if let Some(hints) = agent_hints {
