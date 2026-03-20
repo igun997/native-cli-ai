@@ -121,10 +121,31 @@ impl WorktreeManager {
             .join("worktrees")
             .join(session_id);
 
+        // Clean up stale worktree if path exists
         if worktree_path.exists() {
-            std::fs::remove_dir_all(&worktree_path)
-                .map_err(|e| WorktreeError::Io(e.to_string()))?;
+            // Try to remove via git worktree first
+            let _ = Command::new("git")
+                .args(["worktree", "remove", "--force", &worktree_path.display().to_string()])
+                .current_dir(&self.repo_root)
+                .output();
+            // If still exists, remove directory
+            if worktree_path.exists() {
+                std::fs::remove_dir_all(&worktree_path)
+                    .map_err(|e| WorktreeError::Io(e.to_string()))?;
+            }
         }
+
+        // Prune stale worktree references
+        let _ = Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(&self.repo_root)
+            .output();
+
+        // Delete stale branch if it exists
+        let _ = Command::new("git")
+            .args(["branch", "-D", &branch_name])
+            .current_dir(&self.repo_root)
+            .output();
 
         if let Some(parent) = worktree_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| WorktreeError::Io(e.to_string()))?;
@@ -350,10 +371,27 @@ impl WorktreeManager {
             .join(format!("merge-{orch_id}"));
         let branch_name = format!("nca/orch-{orch_id}");
 
+        // Clean up stale worktree
         if worktree_path.exists() {
-            std::fs::remove_dir_all(&worktree_path)
-                .map_err(|e| WorktreeError::CreateFailed(e.to_string()))?;
+            let _ = Command::new("git")
+                .args(["worktree", "remove", "--force", &worktree_path.display().to_string()])
+                .current_dir(&self.repo_root)
+                .output();
+            if worktree_path.exists() {
+                std::fs::remove_dir_all(&worktree_path)
+                    .map_err(|e| WorktreeError::CreateFailed(e.to_string()))?;
+            }
         }
+
+        // Prune stale references and delete stale branch
+        let _ = Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(&self.repo_root)
+            .output();
+        let _ = Command::new("git")
+            .args(["branch", "-D", &branch_name])
+            .current_dir(&self.repo_root)
+            .output();
 
         if let Some(parent) = worktree_path.parent() {
             std::fs::create_dir_all(parent)
