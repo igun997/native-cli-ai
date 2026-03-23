@@ -61,21 +61,29 @@ pub struct ApprovalPolicy {
 
 ### 3. Smart Prefix Pattern Extraction
 
-A `pub fn suggest_allow_pattern(tool_name: &str, description: &str) -> String` function in `approval.rs`.
+A `pub fn suggest_allow_pattern(tool_name: &str, tool_input: &serde_json::Value) -> String` function in `approval.rs`.
+
+**Input data:** In the TUI, `ApprovalRequest.input` is a JSON string from `ToolCallStarted.input` (e.g., `{"command":"git status"}`). The function receives the parsed `serde_json::Value`.
 
 **Logic:**
-1. Extract the first whitespace-delimited word from `description`.
-2. If a first word exists: return `"{tool_name}:{first_word} *"`.
-3. If description is empty or a single word with no further content: return `"{tool_name}:*"`.
+1. Extract the "meaningful text" from the tool input:
+   - For objects: look for known keys in order: `command`, `path`, `file_path`, `url`. Take the first found string value.
+   - For strings: use the string directly.
+   - Otherwise: empty string.
+2. Extract the first whitespace-delimited word from the meaningful text.
+3. If a first word exists: return `"{tool_name}:{first_word} *"`.
+4. If the meaningful text is empty: return `"{tool_name}:*"`.
 
-**Examples:**
+**Note on matching:** The key built in `ApprovalPolicy::check()` is `"{tool_name}:{input.to_string()}"` where `input.to_string()` is the JSON serialization. The generated pattern `execute_bash:git *` must match against this JSON key. Since the key contains the JSON like `execute_bash:{"command":"git status"}`, the pattern needs to match against that. Therefore patterns should be constructed to match against the full JSON key: `execute_bash:*git *` (with leading `*` to skip JSON structure before the command text). Alternatively, `check()` can be updated to also build a "human-readable key" for matching. **Recommended:** update `check()` to extract the same meaningful text and build a secondary key `"{tool_name}:{meaningful_text}"` for pattern matching, keeping the JSON key for deny matching backward compatibility.
 
-| Tool | Description | Pattern |
-|------|-------------|---------|
-| `execute_bash` | `git status` | `execute_bash:git *` |
-| `execute_bash` | `npm install express` | `execute_bash:npm *` |
-| `write_file` | `src/main.rs` | `write_file:src/main.rs *` |
-| `delete_path` | *(empty)* | `delete_path:*` |
+**Examples (with human-readable key):**
+
+| Tool | Input JSON | Extracted Text | Pattern |
+|------|-----------|----------------|---------|
+| `execute_bash` | `{"command":"git status"}` | `git status` | `execute_bash:git *` |
+| `execute_bash` | `{"command":"npm install express"}` | `npm install express` | `execute_bash:npm *` |
+| `write_file` | `{"path":"src/main.rs","content":"..."}` | `src/main.rs` | `write_file:src/main.rs *` |
+| `delete_path` | `{}` | *(empty)* | `delete_path:*` |
 
 ### 4. ApprovalVerdict Enum
 
@@ -100,10 +108,12 @@ All existing `ApprovalHandler` implementations are updated to return `ApprovalVe
 
 In `crates/cli/src/tui/app.rs`, add a handler next to the existing Ctrl+Y (~line 3151):
 
-```
+```rust
 (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
     if let Some(req) = g.active_approval.clone() {
-        let pattern = suggest_allow_pattern(&req.tool, &req.input);
+        let input_json: serde_json::Value =
+            serde_json::from_str(&req.input).unwrap_or_default();
+        let pattern = suggest_allow_pattern(&req.tool, &input_json);
         let call_id = req.call_id.clone();
         g.input_buffer.clear();
         g.cursor_char_idx = 0;
@@ -112,7 +122,7 @@ In `crates/cli/src/tui/app.rs`, add a handler next to the existing Ctrl+Y (~line
         ));
         drop(g);
         if let Some(ref tx) = approval_answer_tx {
-            // send AllowPattern variant
+            let _ = tx.send(ApprovalAnswer::AllowPattern { call_id, pattern });
         }
         continue;
     }
@@ -122,7 +132,7 @@ In `crates/cli/src/tui/app.rs`, add a handler next to the existing Ctrl+Y (~line
 **Channel type change:** The `approval_answer_tx` channel changes from sending `(String, bool)` to sending `ApprovalAnswer`:
 
 ```rust
-enum ApprovalAnswer {
+pub enum ApprovalAnswer {
     Verdict { call_id: String, approved: bool },
     AllowPattern { call_id: String, pattern: String },
 }
@@ -133,30 +143,59 @@ enum ApprovalAnswer {
 Reply: y/n · Ctrl+Y approve · Ctrl+N deny · Ctrl+U always allow
 ```
 
-### 6. Agent Loop — Handling AllowPattern
+### 6. Data Flow — TUI to Agent Loop
 
-In `crates/core/src/agent.rs`, where `self.approval.resolve()` is called:
+The full data flow for `AllowPattern` through the TUI path:
+
+1. **TUI** (app.rs): User presses Ctrl+U. TUI sends `ApprovalAnswer::AllowPattern { call_id, pattern }` via `approval_answer_tx`.
+
+2. **REPL dispatch** (repl.rs ~line 1613): The approval dispatch task currently receives `(String, bool)` from `approval_rx` and calls `dispatch_tool_approval()`. This changes to receive `ApprovalAnswer` and dispatch accordingly:
+   - `ApprovalAnswer::Verdict { call_id, approved }` -> sends `ApprovalVerdict::Approved` or `ApprovalVerdict::Denied` via oneshot
+   - `ApprovalAnswer::AllowPattern { call_id, pattern }` -> sends `ApprovalVerdict::AllowPattern(pattern)` via oneshot
+
+3. **Runner** (runner.rs): `dispatch_tool_approval()` signature changes from `(approvals, call_id, approved: bool)` to `(approvals, call_id, verdict: ApprovalVerdict)`. It resolves the oneshot with the verdict directly.
+
+4. **IPC pending map** (ipc_pending.rs): `ApprovalPendingMap` type changes from `Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>` to `Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalVerdict>>>>`.
+
+5. **Agent loop** (agent.rs): `self.approval.resolve()` now returns `ApprovalVerdict`. The `IpcApprovalHandler` in supervisor.rs awaits the oneshot and returns the verdict:
 
 ```rust
-match self.approval.resolve(call, &description).await {
+let verdict = self.approval.resolve(call, &description).await;
+self.emit(AgentEvent::ApprovalResolved {
+    call_id: call.id.clone(),
+    approved: matches!(verdict, ApprovalVerdict::Approved | ApprovalVerdict::AllowPattern(_)),
+}).await;
+match verdict {
     ApprovalVerdict::Approved => { /* existing approve logic */ }
     ApprovalVerdict::Denied => { /* existing deny logic */ }
     ApprovalVerdict::AllowPattern(pattern) => {
         self.approval.add_session_allow(pattern);
-        // treat as approved
+        // then proceed with existing approve logic
     }
 }
 ```
+
+**IPC handler changes in supervisor.rs:**
+- `IpcApprovalHandler.pending` map type: `oneshot::Sender<bool>` -> `oneshot::Sender<ApprovalVerdict>`
+- The `resolve` impl awaits the oneshot and returns `ApprovalVerdict` directly
+- Fallback prompt (when IPC times out) returns `ApprovalVerdict::Approved` / `ApprovalVerdict::Denied`
+
+**IPC socket path (supervisor `spawn_command_consumer`):**
+- `AgentCommand::ApproveToolCall` / `DenyToolCall` also updated to send `ApprovalVerdict` through the pending map
+- No new `AgentCommand` variant for AllowPattern via IPC socket (out of scope)
 
 ## Files Changed
 
 | File | Change |
 |------|--------|
-| `crates/core/src/approval.rs` | `wildcard_matches`, `suggest_allow_pattern`, `session_allow` field, `ApprovalVerdict` enum, update `ApprovalHandler` trait |
-| `crates/core/src/agent.rs` | Handle `ApprovalVerdict::AllowPattern` in tool execution loop |
-| `crates/cli/src/tui/app.rs` | Ctrl+U handler, `ApprovalAnswer` enum, hint text, channel type |
+| `crates/core/src/approval.rs` | `wildcard_matches`, `suggest_allow_pattern`, `extract_meaningful_text`, `session_allow` field, `ApprovalVerdict` enum, update `ApprovalHandler` trait, update `check()` to use human-readable key |
+| `crates/core/src/agent.rs` | Handle `ApprovalVerdict::AllowPattern` in tool execution loop, update `ApprovalResolved` event |
+| `crates/cli/src/tui/app.rs` | Ctrl+U handler, `ApprovalAnswer` enum, hint text, channel type change |
 | `crates/cli/src/approval_prompts.rs` | Update all `ApprovalHandler` impls to return `ApprovalVerdict` |
-| `crates/runtime/src/supervisor.rs` | Update IPC approval handler for `ApprovalVerdict` |
+| `crates/cli/src/ipc_pending.rs` | Update `ApprovalPendingMap` type alias to `oneshot<ApprovalVerdict>` |
+| `crates/cli/src/runner.rs` | Update `dispatch_tool_approval` to accept `ApprovalVerdict` |
+| `crates/cli/src/repl.rs` | Update approval dispatch task to handle `ApprovalAnswer` enum |
+| `crates/runtime/src/supervisor.rs` | Update `IpcApprovalHandler` and `spawn_command_consumer` for `ApprovalVerdict` |
 
 ## Testing
 
