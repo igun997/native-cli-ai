@@ -11,7 +11,7 @@ use cli_prompts::{
     prompts::{AbortReason, Confirmation},
 };
 use nca_common::tool::ToolCall;
-use nca_core::approval::ApprovalHandler;
+use nca_core::approval::{ApprovalHandler, ApprovalVerdict};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -115,9 +115,12 @@ impl Default for InteractiveApprovalHandler {
 
 #[async_trait::async_trait]
 impl ApprovalHandler for InteractiveApprovalHandler {
-    async fn resolve(&self, call: &ToolCall, description: &str) -> bool {
+    async fn resolve(&self, call: &ToolCall, description: &str) -> ApprovalVerdict {
         let _guard = self.prompt_lock.lock().await;
-        self.prompt_approval(call, description).unwrap_or(false)
+        match self.prompt_approval(call, description) {
+            Some(true) => ApprovalVerdict::Approved,
+            _ => ApprovalVerdict::Denied,
+        }
     }
 }
 
@@ -175,7 +178,7 @@ impl Default for InteractiveIpcApprovalHandler {
 
 #[async_trait::async_trait]
 impl ApprovalHandler for InteractiveIpcApprovalHandler {
-    async fn resolve(&self, call: &ToolCall, description: &str) -> bool {
+    async fn resolve(&self, call: &ToolCall, description: &str) -> ApprovalVerdict {
         let (tx, rx) = tokio::sync::oneshot::channel();
         {
             let mut m = self.pending.lock().await;
@@ -186,7 +189,7 @@ impl ApprovalHandler for InteractiveIpcApprovalHandler {
             Ok(Ok(approved)) => {
                 let mut m = self.pending.lock().await;
                 m.remove(&call.id);
-                approved
+                if approved { ApprovalVerdict::Approved } else { ApprovalVerdict::Denied }
             }
             _ => {
                 let mut m = self.pending.lock().await;
@@ -194,7 +197,10 @@ impl ApprovalHandler for InteractiveIpcApprovalHandler {
                 drop(m);
 
                 let _guard = self.prompt_lock.lock().await;
-                self.prompt_approval(call, description).unwrap_or(false)
+                match self.prompt_approval(call, description) {
+                    Some(true) => ApprovalVerdict::Approved,
+                    _ => ApprovalVerdict::Denied,
+                }
             }
         }
     }
@@ -221,7 +227,7 @@ pub mod legacy {
 
     #[async_trait::async_trait]
     impl ApprovalHandler for StdioApprovalHandler {
-        async fn resolve(&self, call: &ToolCall, description: &str) -> bool {
+        async fn resolve(&self, call: &ToolCall, description: &str) -> ApprovalVerdict {
             let _guard = self.prompt_lock.lock().await;
             let mut stderr = io::stderr();
             let stdin = io::stdin();
@@ -233,18 +239,22 @@ pub mod legacy {
                 truncate(&format_json_pretty(&call.input), 200)
             );
             if stderr.write_all(prompt.as_bytes()).await.is_err() {
-                return false;
+                return ApprovalVerdict::Denied;
             }
             if stderr.flush().await.is_err() {
-                return false;
+                return ApprovalVerdict::Denied;
             }
 
             let mut answer = String::new();
             if reader.read_line(&mut answer).await.is_err() {
-                return false;
+                return ApprovalVerdict::Denied;
             }
 
-            matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+            if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                ApprovalVerdict::Approved
+            } else {
+                ApprovalVerdict::Denied
+            }
         }
     }
 }

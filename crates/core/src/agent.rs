@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::approval::ApprovalPolicy;
+use crate::approval::{ApprovalPolicy, ApprovalVerdict};
 use crate::cost::CostTracker;
 use crate::hooks::{HookEventKind, HookRunner};
 use crate::provider::{Provider, ProviderError, StreamChunk};
@@ -302,12 +302,16 @@ impl AgentLoop {
                                 )
                                 .await;
                         }
-                        let approved = self.approval.resolve(call, &description).await;
+                        let verdict = self.approval.resolve(call, &description).await;
+                        let approved = verdict.is_approved();
                         self.emit(AgentEvent::ApprovalResolved {
                             call_id: call.id.clone(),
                             approved,
                         })
                         .await;
+                        if let ApprovalVerdict::AllowPattern(pattern) = &verdict {
+                            self.approval.add_session_allow(pattern.clone());
+                        }
 
                         if approved {
                             if let Some(hooks) = &self.hooks

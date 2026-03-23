@@ -1615,7 +1615,8 @@ impl Repl {
         let approval_state = tui_state.clone();
         tokio::spawn(async move {
             while let Some((call_id, approved)) = approval_rx.recv().await {
-                if !dispatch_tool_approval(&approval_dispatch, &call_id, approved)
+                let verdict = if approved { nca_core::approval::ApprovalVerdict::Approved } else { nca_core::approval::ApprovalVerdict::Denied };
+                if !dispatch_tool_approval(&approval_dispatch, &call_id, verdict)
                     && let Ok(mut g) = approval_state.lock()
                 {
                     g.clear_active_approval_if_matches(&call_id);

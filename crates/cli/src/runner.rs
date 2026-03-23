@@ -2,7 +2,7 @@ use crate::ipc_pending::{ApprovalPendingMap, QuestionPendingMap};
 use nca_common::config::{NcaConfig, PermissionMode};
 use nca_common::event::{AgentEvent, EndReason, QuestionSelection};
 use nca_common::session::{OrchestrationContext, SessionSnapshot};
-use nca_core::approval::ApprovalHandler;
+use nca_core::approval::{ApprovalHandler, ApprovalVerdict};
 use nca_core::provider::ProviderError;
 use nca_core::tools::spawn_subagent::SpawnRequest;
 use nca_runtime::ipc::IpcHandle;
@@ -34,7 +34,7 @@ pub fn dispatch_question_answer(
 pub fn dispatch_tool_approval(
     approvals: &Option<ApprovalPendingMap>,
     call_id: &str,
-    approved: bool,
+    verdict: ApprovalVerdict,
 ) -> bool {
     let Some(approvals) = approvals else {
         return false;
@@ -45,7 +45,7 @@ pub fn dispatch_tool_approval(
     let Some(tx) = map.remove(call_id) else {
         return false;
     };
-    tx.send(approved).is_ok()
+    tx.send(verdict).is_ok()
 }
 
 /// Thin CLI wrapper around the runtime `Supervisor`.

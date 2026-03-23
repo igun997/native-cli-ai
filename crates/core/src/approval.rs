@@ -2,9 +2,24 @@ use nca_common::config::{PermissionConfig, PermissionMode};
 use nca_common::tool::{PermissionTier, ToolCall};
 use std::sync::Arc;
 
+/// Result of an approval prompt.
+#[derive(Debug, Clone)]
+pub enum ApprovalVerdict {
+    Approved,
+    Denied,
+    /// User chose "always allow" — pattern should be added to session allow list.
+    AllowPattern(String),
+}
+
+impl ApprovalVerdict {
+    pub fn is_approved(&self) -> bool {
+        matches!(self, ApprovalVerdict::Approved | ApprovalVerdict::AllowPattern(_))
+    }
+}
+
 #[async_trait::async_trait]
 pub trait ApprovalHandler: Send + Sync {
-    async fn resolve(&self, call: &ToolCall, description: &str) -> bool;
+    async fn resolve(&self, call: &ToolCall, description: &str) -> ApprovalVerdict;
 }
 
 /// Match `text` against `pattern` where `*` matches any substring.
@@ -197,10 +212,10 @@ impl ApprovalPolicy {
         }
     }
 
-    pub async fn resolve(&self, call: &ToolCall, description: &str) -> bool {
+    pub async fn resolve(&self, call: &ToolCall, description: &str) -> ApprovalVerdict {
         match &self.handler {
             Some(handler) => handler.resolve(call, description).await,
-            None => false,
+            None => ApprovalVerdict::Denied,
         }
     }
 

@@ -12,7 +12,7 @@ use nca_common::session::{
     OrchestrationContext, SessionMeta, SessionSnapshot, SessionState, SessionStatus,
 };
 use nca_core::agent::AgentLoop;
-use nca_core::approval::{ApprovalHandler, ApprovalPolicy};
+use nca_core::approval::{ApprovalHandler, ApprovalPolicy, ApprovalVerdict};
 use nca_core::harness::build_system_prompt;
 use nca_core::hooks::{HookEventKind, HookRunner};
 use nca_core::provider::ProviderError;
@@ -30,7 +30,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
 
-pub type ApprovalPendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>;
+pub type ApprovalPendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalVerdict>>>>;
 pub type QuestionPendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<QuestionSelection>>>>;
 type EventFanoutCallback = Box<dyn Fn(&EventEnvelope) + Send>;
 
@@ -958,7 +958,7 @@ pub fn spawn_command_consumer_with_store(
                         && let Ok(mut m) = p.lock()
                         && let Some(tx) = m.remove(&call_id)
                     {
-                        let _ = tx.send(true);
+                        let _ = tx.send(ApprovalVerdict::Approved);
                     }
                 }
                 AgentCommand::DenyToolCall { call_id } => {
@@ -966,7 +966,7 @@ pub fn spawn_command_consumer_with_store(
                         && let Ok(mut m) = p.lock()
                         && let Some(tx) = m.remove(&call_id)
                     {
-                        let _ = tx.send(false);
+                        let _ = tx.send(ApprovalVerdict::Denied);
                     }
                 }
                 AgentCommand::Cancel => {
@@ -1046,18 +1046,18 @@ impl IpcApprovalHandler {
 
 #[async_trait::async_trait]
 impl ApprovalHandler for IpcApprovalHandler {
-    async fn resolve(&self, call: &nca_common::tool::ToolCall, _description: &str) -> bool {
+    async fn resolve(&self, call: &nca_common::tool::ToolCall, _description: &str) -> ApprovalVerdict {
         let (tx, rx) = oneshot::channel();
         {
             let mut m = self.pending.lock().unwrap();
             m.insert(call.id.clone(), tx);
         }
         match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
-            Ok(Ok(approved)) => approved,
+            Ok(Ok(verdict)) => verdict,
             _ => {
                 let mut m = self.pending.lock().unwrap();
                 m.remove(&call.id);
-                false
+                ApprovalVerdict::Denied
             }
         }
     }
@@ -1068,8 +1068,8 @@ struct AutoDenyHandler;
 
 #[async_trait::async_trait]
 impl ApprovalHandler for AutoDenyHandler {
-    async fn resolve(&self, _call: &nca_common::tool::ToolCall, _description: &str) -> bool {
-        false
+    async fn resolve(&self, _call: &nca_common::tool::ToolCall, _description: &str) -> ApprovalVerdict {
+        ApprovalVerdict::Denied
     }
 }
 
