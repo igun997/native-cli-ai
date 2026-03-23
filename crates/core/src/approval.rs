@@ -75,6 +75,7 @@ pub struct ApprovalPolicy {
     config: PermissionConfig,
     handler: Option<Arc<dyn ApprovalHandler>>,
     fail_on_ask: bool,
+    pub session_allow: Vec<String>,
 }
 
 impl ApprovalPolicy {
@@ -83,6 +84,14 @@ impl ApprovalPolicy {
             config,
             handler: None,
             fail_on_ask: false,
+            session_allow: Vec::new(),
+        }
+    }
+
+    /// Add a pattern to the session-scoped allow list. Skips duplicates.
+    pub fn add_session_allow(&mut self, pattern: String) {
+        if !self.session_allow.contains(&pattern) {
+            self.session_allow.push(pattern);
         }
     }
 
@@ -98,19 +107,34 @@ impl ApprovalPolicy {
 
     /// Check the permission tier for a given tool name and input description.
     pub fn check(&self, tool_name: &str, description: &str) -> PermissionTier {
-        let key = format!("{tool_name}:{description}");
+        let json_key = format!("{tool_name}:{description}");
 
+        // Build a human-readable key by extracting meaningful text from JSON input
+        let readable_key = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(description) {
+            let text = extract_meaningful_text(&parsed);
+            if text.is_empty() {
+                json_key.clone()
+            } else {
+                format!("{tool_name}:{text}")
+            }
+        } else {
+            json_key.clone()
+        };
+
+        // Deny check: match against both keys
         for pattern in &self.config.deny {
-            if key.contains(pattern) {
+            if wildcard_matches(pattern, &json_key) || wildcard_matches(pattern, &readable_key) {
                 return PermissionTier::Denied;
             }
         }
 
+        // Allow check: config.allow + session_allow, match against both keys
         let explicitly_allowed = self
             .config
             .allow
             .iter()
-            .any(|pattern| key.contains(pattern));
+            .chain(self.session_allow.iter())
+            .any(|pattern| wildcard_matches(pattern, &json_key) || wildcard_matches(pattern, &readable_key));
 
         let readonly = matches!(
             tool_name,
@@ -302,5 +326,58 @@ mod tests {
             suggest_allow_pattern("execute_bash", &input),
             "execute_bash:ls *"
         );
+    }
+
+    use nca_common::config::PermissionConfig;
+
+    #[test]
+    fn session_allow_wildcard_approves_matching_tool() {
+        let config = PermissionConfig::default();
+        let mut policy = ApprovalPolicy::new(config);
+        policy.add_session_allow("execute_bash:git *".into());
+
+        let tier = policy.check("execute_bash", &serde_json::json!({"command": "git status"}).to_string());
+        assert_eq!(tier, PermissionTier::Allowed);
+    }
+
+    #[test]
+    fn session_allow_does_not_match_different_prefix() {
+        let config = PermissionConfig::default();
+        let mut policy = ApprovalPolicy::new(config);
+        policy.add_session_allow("execute_bash:git *".into());
+
+        let tier = policy.check("execute_bash", &serde_json::json!({"command": "npm install"}).to_string());
+        assert_ne!(tier, PermissionTier::Allowed);
+    }
+
+    #[test]
+    fn session_allow_deduplicates() {
+        let config = PermissionConfig::default();
+        let mut policy = ApprovalPolicy::new(config);
+        policy.add_session_allow("execute_bash:git *".into());
+        policy.add_session_allow("execute_bash:git *".into());
+        assert_eq!(policy.session_allow.len(), 1);
+    }
+
+    #[test]
+    fn config_allow_wildcard_works() {
+        let config = PermissionConfig {
+            allow: vec!["execute_bash:git *".into()],
+            ..Default::default()
+        };
+        let policy = ApprovalPolicy::new(config);
+        let tier = policy.check("execute_bash", &serde_json::json!({"command": "git status"}).to_string());
+        assert_eq!(tier, PermissionTier::Allowed);
+    }
+
+    #[test]
+    fn deny_wildcard_works() {
+        let config = PermissionConfig {
+            deny: vec!["execute_bash:rm *".into()],
+            ..Default::default()
+        };
+        let policy = ApprovalPolicy::new(config);
+        let tier = policy.check("execute_bash", &serde_json::json!({"command": "rm -rf /"}).to_string());
+        assert_eq!(tier, PermissionTier::Denied);
     }
 }
