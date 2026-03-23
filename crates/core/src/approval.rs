@@ -7,6 +7,40 @@ pub trait ApprovalHandler: Send + Sync {
     async fn resolve(&self, call: &ToolCall, description: &str) -> bool;
 }
 
+/// Match `text` against `pattern` where `*` matches any substring.
+/// If `pattern` contains no `*`, falls back to `text.contains(pattern)`.
+pub fn wildcard_matches(pattern: &str, text: &str) -> bool {
+    if !pattern.contains('*') {
+        return text.contains(pattern);
+    }
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let mut pos = 0;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if i == 0 {
+            // First segment: text must start with it
+            if !text.starts_with(part) {
+                return false;
+            }
+            pos = part.len();
+        } else if i == parts.len() - 1 {
+            // Last segment: text must end with it
+            if !text[pos..].ends_with(part) {
+                return false;
+            }
+        } else {
+            // Interior segment: must appear after current position
+            match text[pos..].find(part) {
+                Some(idx) => pos += idx + part.len(),
+                None => return false,
+            }
+        }
+    }
+    true
+}
+
 /// Determines whether a tool call or command is allowed, needs approval, or is denied.
 pub struct ApprovalPolicy {
     config: PermissionConfig,
@@ -127,5 +161,57 @@ impl ApprovalPolicy {
 
     pub fn set_mode(&mut self, mode: PermissionMode) {
         self.config.mode = mode;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wildcard_matches_no_star_falls_back_to_contains() {
+        assert!(wildcard_matches("git", "execute_bash:git status"));
+        assert!(!wildcard_matches("npm", "execute_bash:git status"));
+    }
+
+    #[test]
+    fn wildcard_matches_trailing_star() {
+        assert!(wildcard_matches("execute_bash:git *", "execute_bash:git status"));
+        assert!(wildcard_matches("execute_bash:git *", "execute_bash:git push --force"));
+        assert!(!wildcard_matches("execute_bash:git *", "execute_bash:npm install"));
+    }
+
+    #[test]
+    fn wildcard_matches_leading_star() {
+        assert!(wildcard_matches("*:git push", "execute_bash:git push"));
+        assert!(!wildcard_matches("*:git push", "execute_bash:npm install"));
+    }
+
+    #[test]
+    fn wildcard_matches_both_stars() {
+        assert!(wildcard_matches("*:git *", "execute_bash:git push"));
+        assert!(wildcard_matches("*git*", "execute_bash:git status"));
+    }
+
+    #[test]
+    fn wildcard_matches_exact() {
+        assert!(wildcard_matches("execute_bash:git status", "execute_bash:git status"));
+        assert!(!wildcard_matches("execute_bash:git status", "execute_bash:git push"));
+    }
+
+    #[test]
+    fn wildcard_matches_star_only() {
+        assert!(wildcard_matches("*", "anything at all"));
+    }
+
+    #[test]
+    fn wildcard_matches_empty_pattern() {
+        assert!(wildcard_matches("", "anything"));
+    }
+
+    #[test]
+    fn wildcard_matches_tool_level() {
+        assert!(wildcard_matches("execute_bash:*", "execute_bash:git status"));
+        assert!(!wildcard_matches("execute_bash:*", "write_file:src/main.rs"));
     }
 }
