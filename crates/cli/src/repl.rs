@@ -10,6 +10,7 @@ use crate::tui::{
     git_current_branch, git_list_branches, git_switch_branch, replay_event_log_into_state,
     run_blocking, spawn_tui_bridge,
 };
+use crate::tui::app::ApprovalAnswer;
 use nca_common::config::{PermissionMode, ProviderKind};
 use nca_common::event::{EndReason, QuestionSelection};
 use nca_core::skills::SkillCatalog;
@@ -1610,12 +1611,25 @@ impl Repl {
         drop(answer_tx);
 
         let (approval_tx, mut approval_rx) =
-            tokio::sync::mpsc::unbounded_channel::<(String, bool)>();
+            tokio::sync::mpsc::unbounded_channel::<ApprovalAnswer>();
         let approval_dispatch = approval.clone();
         let approval_state = tui_state.clone();
         tokio::spawn(async move {
-            while let Some((call_id, approved)) = approval_rx.recv().await {
-                let verdict = if approved { nca_core::approval::ApprovalVerdict::Approved } else { nca_core::approval::ApprovalVerdict::Denied };
+            while let Some(answer) = approval_rx.recv().await {
+                let (call_id, verdict) = match answer {
+                    ApprovalAnswer::Verdict { call_id, approved } => (
+                        call_id,
+                        if approved {
+                            nca_core::approval::ApprovalVerdict::Approved
+                        } else {
+                            nca_core::approval::ApprovalVerdict::Denied
+                        },
+                    ),
+                    ApprovalAnswer::AllowPattern { call_id, pattern } => (
+                        call_id,
+                        nca_core::approval::ApprovalVerdict::AllowPattern(pattern),
+                    ),
+                };
                 if !dispatch_tool_approval(&approval_dispatch, &call_id, verdict)
                     && let Ok(mut g) = approval_state.lock()
                 {

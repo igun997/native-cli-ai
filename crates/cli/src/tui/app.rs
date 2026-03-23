@@ -25,6 +25,7 @@ use crossterm::{
 };
 use nca_common::config::ProviderKind;
 use nca_common::event::QuestionSelection;
+use nca_core::approval::suggest_allow_pattern;
 use nca_core::skills::{SkillCatalog, SkillSource};
 use ratatui::{
     Terminal,
@@ -38,6 +39,13 @@ use std::io::{Stdout, stdout};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
+
+/// Message from TUI to the approval dispatch task.
+#[derive(Debug)]
+pub enum ApprovalAnswer {
+    Verdict { call_id: String, approved: bool },
+    AllowPattern { call_id: String, pattern: String },
+}
 
 /// Per flattened transcript line: click selects this answer (same indices as `transcript_lines`).
 type LineAnswerHit = Option<QuestionSelection>;
@@ -1105,7 +1113,7 @@ fn render_approval_block(
         lines,
         hits,
         Line::from(Span::styled(
-            " Reply: y / yes / ok to approve · n / no / deny to deny · or Ctrl+Y / Ctrl+N · /approve / /deny",
+            " Reply: y/n · Ctrl+Y approve · Ctrl+N deny · Ctrl+U always allow · /approve · /deny",
             Style::default().fg(theme::MUTED),
         )),
         None,
@@ -1209,7 +1217,7 @@ pub fn run_blocking(
     state: Arc<Mutex<TuiSessionState>>,
     cmd_tx: UnboundedSender<TuiCmd>,
     question_answer_tx: Option<UnboundedSender<(String, QuestionSelection)>>,
-    approval_answer_tx: Option<UnboundedSender<(String, bool)>>,
+    approval_answer_tx: Option<UnboundedSender<ApprovalAnswer>>,
     show_run_banner: bool,
 ) -> anyhow::Result<()> {
     let mut terminal = setup_terminal()?;
@@ -1656,7 +1664,7 @@ pub fn run_blocking(
 
                 let hint = if g.active_approval.is_some() {
                     Line::from(Span::styled(
-                        "Approval: y / yes / ok · n / no / deny · Ctrl+Y approve · Ctrl+N deny · /approve / /deny · other /commands still work",
+                        "Approval: y/n · Ctrl+Y approve · Ctrl+N deny · Ctrl+U always allow · /approve · /deny · other /commands still work",
                         Style::default().fg(theme::ERROR),
                     ))
                 } else if g.active_question.is_some() {
@@ -3155,7 +3163,7 @@ pub fn run_blocking(
                                 g.cursor_char_idx = 0;
                                 drop(g);
                                 if let Some(ref tx) = approval_answer_tx {
-                                    let _ = tx.send((call_id, true));
+                                    let _ = tx.send(ApprovalAnswer::Verdict { call_id, approved: true });
                                 }
                                 continue;
                             }
@@ -3167,7 +3175,25 @@ pub fn run_blocking(
                                 g.cursor_char_idx = 0;
                                 drop(g);
                                 if let Some(ref tx) = approval_answer_tx {
-                                    let _ = tx.send((call_id, false));
+                                    let _ = tx.send(ApprovalAnswer::Verdict { call_id, approved: false });
+                                }
+                                continue;
+                            }
+                        }
+                        (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                            if let Some(req) = g.active_approval.clone() {
+                                let input_json: serde_json::Value =
+                                    serde_json::from_str(&req.input).unwrap_or_default();
+                                let pattern = suggest_allow_pattern(&req.tool, &input_json);
+                                let call_id = req.call_id.clone();
+                                g.input_buffer.clear();
+                                g.cursor_char_idx = 0;
+                                g.blocks.push(DisplayBlock::System(
+                                    format!("Always allowing: {pattern}"),
+                                ));
+                                drop(g);
+                                if let Some(ref tx) = approval_answer_tx {
+                                    let _ = tx.send(ApprovalAnswer::AllowPattern { call_id, pattern });
                                 }
                                 continue;
                             }
@@ -3198,7 +3224,7 @@ pub fn run_blocking(
                                         let call_id = req.call_id.clone();
                                         drop(g);
                                         if let Some(ref tx) = approval_answer_tx {
-                                            let _ = tx.send((call_id, approved));
+                                            let _ = tx.send(ApprovalAnswer::Verdict { call_id, approved });
                                         } else {
                                             let _ = cmd_tx.send(TuiCmd::CancelTurn);
                                         }
@@ -3212,7 +3238,7 @@ pub fn run_blocking(
                                     let call_id = req.call_id.clone();
                                     drop(g);
                                     if let Some(ref tx) = approval_answer_tx {
-                                        let _ = tx.send((call_id, approved));
+                                        let _ = tx.send(ApprovalAnswer::Verdict { call_id, approved });
                                     } else {
                                         let _ = cmd_tx.send(TuiCmd::CancelTurn);
                                     }
