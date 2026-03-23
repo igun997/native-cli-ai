@@ -41,6 +41,35 @@ pub fn wildcard_matches(pattern: &str, text: &str) -> bool {
     true
 }
 
+/// Extract the human-readable text from a tool's JSON input.
+/// Looks for known keys: command, path, file_path, url.
+pub fn extract_meaningful_text(input: &serde_json::Value) -> String {
+    match input {
+        serde_json::Value::Object(map) => {
+            for key in &["command", "path", "file_path", "url"] {
+                if let Some(serde_json::Value::String(s)) = map.get(*key) {
+                    return s.clone();
+                }
+            }
+            String::new()
+        }
+        serde_json::Value::String(s) => s.clone(),
+        _ => String::new(),
+    }
+}
+
+/// Generate a smart wildcard allow pattern from a tool name and its JSON input.
+/// E.g. ("execute_bash", {"command":"git status"}) -> "execute_bash:git *"
+pub fn suggest_allow_pattern(tool_name: &str, tool_input: &serde_json::Value) -> String {
+    let text = extract_meaningful_text(tool_input);
+    let first_word = text.split_whitespace().next().unwrap_or("");
+    if first_word.is_empty() {
+        format!("{tool_name}:*")
+    } else {
+        format!("{tool_name}:{first_word} *")
+    }
+}
+
 /// Determines whether a tool call or command is allowed, needs approval, or is denied.
 pub struct ApprovalPolicy {
     config: PermissionConfig,
@@ -213,5 +242,65 @@ mod tests {
     fn wildcard_matches_tool_level() {
         assert!(wildcard_matches("execute_bash:*", "execute_bash:git status"));
         assert!(!wildcard_matches("execute_bash:*", "write_file:src/main.rs"));
+    }
+
+    #[test]
+    fn extract_meaningful_text_command_key() {
+        let input = serde_json::json!({"command": "git status"});
+        assert_eq!(extract_meaningful_text(&input), "git status");
+    }
+
+    #[test]
+    fn extract_meaningful_text_path_key() {
+        let input = serde_json::json!({"path": "src/main.rs", "content": "fn main() {}"});
+        assert_eq!(extract_meaningful_text(&input), "src/main.rs");
+    }
+
+    #[test]
+    fn extract_meaningful_text_empty_object() {
+        let input = serde_json::json!({});
+        assert_eq!(extract_meaningful_text(&input), "");
+    }
+
+    #[test]
+    fn extract_meaningful_text_string_value() {
+        let input = serde_json::json!("hello world");
+        assert_eq!(extract_meaningful_text(&input), "hello world");
+    }
+
+    #[test]
+    fn suggest_pattern_bash_git() {
+        let input = serde_json::json!({"command": "git status"});
+        assert_eq!(
+            suggest_allow_pattern("execute_bash", &input),
+            "execute_bash:git *"
+        );
+    }
+
+    #[test]
+    fn suggest_pattern_bash_npm() {
+        let input = serde_json::json!({"command": "npm install express"});
+        assert_eq!(
+            suggest_allow_pattern("execute_bash", &input),
+            "execute_bash:npm *"
+        );
+    }
+
+    #[test]
+    fn suggest_pattern_empty_input() {
+        let input = serde_json::json!({});
+        assert_eq!(
+            suggest_allow_pattern("delete_path", &input),
+            "delete_path:*"
+        );
+    }
+
+    #[test]
+    fn suggest_pattern_single_word_command() {
+        let input = serde_json::json!({"command": "ls"});
+        assert_eq!(
+            suggest_allow_pattern("execute_bash", &input),
+            "execute_bash:ls *"
+        );
     }
 }
