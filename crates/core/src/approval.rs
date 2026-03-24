@@ -80,11 +80,16 @@ pub fn extract_meaningful_text(input: &serde_json::Value) -> String {
 /// E.g. ("execute_bash", {"command":"git status"}) -> "execute_bash:git *"
 pub fn suggest_allow_pattern(tool_name: &str, tool_input: &serde_json::Value) -> String {
     let text = extract_meaningful_text(tool_input);
-    let first_word = text.split_whitespace().next().unwrap_or("");
+    let mut words = text.split_whitespace();
+    let first_word = words.next().unwrap_or("");
     if first_word.is_empty() {
         format!("{tool_name}:*")
-    } else {
+    } else if words.next().is_some() {
+        // Multi-word input: wildcard after first word
         format!("{tool_name}:{first_word} *")
+    } else {
+        // Single-word input: wildcard directly after (no space)
+        format!("{tool_name}:{first_word}*")
     }
 }
 
@@ -366,7 +371,7 @@ mod tests {
         let input = serde_json::json!({"command": "ls"});
         assert_eq!(
             suggest_allow_pattern("execute_bash", &input),
-            "execute_bash:ls *"
+            "execute_bash:ls*"
         );
     }
 
