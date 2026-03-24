@@ -1001,58 +1001,61 @@ fn transcript_lines_and_hits(
                         None,
                     );
                 }
-                push_transcript_line(
-                    &mut lines,
-                    &mut hits,
-                    Line::from(vec![
-                        Span::styled(
-                            format!("  [0] suggested: {} ", q.suggested_answer),
-                            Style::default()
-                                .fg(theme::SUCCESS)
-                                .add_modifier(Modifier::UNDERLINED),
-                        ),
-                        Span::styled("(click)", Style::default().fg(theme::MUTED)),
-                    ]),
-                    Some(QuestionSelection::Suggested),
-                );
-                for (i, o) in q.options.iter().enumerate() {
+                // When the modal is open, skip inline options — the popup handles selection.
+                if !state.question_modal_open {
                     push_transcript_line(
                         &mut lines,
                         &mut hits,
                         Line::from(vec![
                             Span::styled(
-                                format!("  [{}] ({}) {} ", i + 1, o.id, o.label),
+                                format!("  [0] suggested: {} ", q.suggested_answer),
                                 Style::default()
-                                    .fg(theme::TEXT)
+                                    .fg(theme::SUCCESS)
                                     .add_modifier(Modifier::UNDERLINED),
                             ),
                             Span::styled("(click)", Style::default().fg(theme::MUTED)),
                         ]),
-                        Some(QuestionSelection::Option {
-                            option_id: o.id.clone(),
-                        }),
+                        Some(QuestionSelection::Suggested),
                     );
-                }
-                if q.allow_custom {
+                    for (i, o) in q.options.iter().enumerate() {
+                        push_transcript_line(
+                            &mut lines,
+                            &mut hits,
+                            Line::from(vec![
+                                Span::styled(
+                                    format!("  [{}] ({}) {} ", i + 1, o.id, o.label),
+                                    Style::default()
+                                        .fg(theme::TEXT)
+                                        .add_modifier(Modifier::UNDERLINED),
+                                ),
+                                Span::styled("(click)", Style::default().fg(theme::MUTED)),
+                            ]),
+                            Some(QuestionSelection::Option {
+                                option_id: o.id.clone(),
+                            }),
+                        );
+                    }
+                    if q.allow_custom {
+                        push_transcript_line(
+                            &mut lines,
+                            &mut hits,
+                            Line::from(Span::styled(
+                                "  [c] type your own answer below, then Enter",
+                                Style::default().fg(theme::MUTED),
+                            )),
+                            None,
+                        );
+                    }
                     push_transcript_line(
                         &mut lines,
                         &mut hits,
                         Line::from(Span::styled(
-                            "  [c] type your own answer below, then Enter",
+                            "  Tip: /auto-answer or Enter on empty = suggested · click an option above",
                             Style::default().fg(theme::MUTED),
                         )),
                         None,
                     );
                 }
-                push_transcript_line(
-                    &mut lines,
-                    &mut hits,
-                    Line::from(Span::styled(
-                        "  Tip: /auto-answer or Enter on empty = suggested · click an option above",
-                        Style::default().fg(theme::MUTED),
-                    )),
-                    None,
-                );
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
             }
             DisplayBlock::ErrorLine(s) => {
