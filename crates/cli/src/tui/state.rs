@@ -422,6 +422,7 @@ impl TuiSessionState {
     pub fn clear_replayed_interaction_state(&mut self) {
         self.active_approval = None;
         self.active_question = None;
+        self.close_question_modal();
     }
 
     pub fn clear_active_approval_if_matches(&mut self, call_id: &str) {
