@@ -182,12 +182,13 @@ impl Supervisor {
             event_tx.clone(),
             question_pending.clone(),
         )));
+        let session_id = cfg.session_id.unwrap_or_else(generate_session_id);
         tools.register(Box::new(InvokeSkillTool::new(
             workspace_root.clone(),
             config.harness.skill_directories.clone(),
+            event_tx.clone(),
+            session_id.clone(),
         )));
-
-        let session_id = cfg.session_id.unwrap_or_else(generate_session_id);
         let session_store = SessionStore::new(workspace_root.join(&config.session.history_dir));
 
         let ipc_server = IpcServer::new(&session_id);

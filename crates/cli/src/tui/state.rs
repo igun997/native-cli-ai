@@ -48,6 +48,7 @@ pub struct SubagentRow {
     pub phase: String,
     pub detail: String,
     pub running: bool,
+    pub skill: Option<String>,
 }
 
 /// Status of an API key validation during onboarding.
@@ -655,6 +656,7 @@ impl TuiSessionState {
                         phase: String::new(),
                         detail: String::new(),
                         running: true,
+                        skill: None,
                     });
                 }
                 self.blocks.push(DisplayBlock::System(format!(
@@ -677,6 +679,9 @@ impl TuiSessionState {
                     row.phase = phase.clone();
                     row.detail = d.clone();
                     row.running = true;
+                    if phase == "skill" {
+                        row.skill = Some(detail.clone());
+                    }
                 } else {
                     self.subagents.push(SubagentRow {
                         id: child_session_id.clone(),
@@ -684,6 +689,11 @@ impl TuiSessionState {
                         phase: phase.clone(),
                         detail: d.clone(),
                         running: true,
+                        skill: if phase == "skill" {
+                            Some(detail.clone())
+                        } else {
+                            None
+                        },
                     });
                 }
                 self.blocks

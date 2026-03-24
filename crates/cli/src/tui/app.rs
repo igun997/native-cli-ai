@@ -1555,6 +1555,12 @@ pub fn run_blocking(
                                     Style::default().fg(theme::MUTED),
                                 )));
                             }
+                            if let Some(ref skill_name) = row.skill {
+                                todo_lines.push(Line::from(Span::styled(
+                                    format!("  [{}]", sidebar_fit(skill_name, 24)),
+                                    Style::default().fg(theme::WARN),
+                                )));
+                            }
                             if !row.task.is_empty() && row.task != "(sub-agent)" {
                                 todo_lines.push(Line::from(Span::styled(
                                     format!("  {}", sidebar_fit(&row.task, 26)),

@@ -2,19 +2,30 @@
 
 use crate::skills::SkillCatalog;
 use crate::tools::ToolExecutor;
+use nca_common::event::AgentEvent;
 use nca_common::tool::{ToolCall, ToolDefinition, ToolResult};
 use std::path::PathBuf;
+use tokio::sync::mpsc;
 
 pub struct InvokeSkillTool {
     workspace_root: PathBuf,
     skill_directories: Vec<PathBuf>,
+    event_tx: mpsc::Sender<AgentEvent>,
+    session_id: String,
 }
 
 impl InvokeSkillTool {
-    pub fn new(workspace_root: PathBuf, skill_directories: Vec<PathBuf>) -> Self {
+    pub fn new(
+        workspace_root: PathBuf,
+        skill_directories: Vec<PathBuf>,
+        event_tx: mpsc::Sender<AgentEvent>,
+        session_id: String,
+    ) -> Self {
         Self {
             workspace_root,
             skill_directories,
+            event_tx,
+            session_id,
         }
     }
 }
@@ -71,6 +82,14 @@ impl ToolExecutor for InvokeSkillTool {
 
         if let Some(skill) = skills.iter().find(|s| s.command == skill_name) {
             let body = skill.expanded_body();
+            let _ = self
+                .event_tx
+                .send(AgentEvent::ChildSessionActivity {
+                    child_session_id: self.session_id.clone(),
+                    phase: "skill".into(),
+                    detail: skill.command.clone(),
+                })
+                .await;
             ToolResult {
                 call_id: call.id.clone(),
                 success: true,
@@ -102,9 +121,12 @@ mod tests {
     use super::*;
 
     fn make_tool(workspace: &std::path::Path) -> InvokeSkillTool {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
         InvokeSkillTool::new(
             workspace.to_path_buf(),
             vec![std::path::PathBuf::from(".nca/skills")],
+            tx,
+            "test-session".into(),
         )
     }
 
