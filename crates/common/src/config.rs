@@ -594,7 +594,9 @@ impl ProviderConfig {
     /// Returns `true` if at least one provider has an API key configured
     /// (either in config or via environment variable).
     pub fn any_api_key_present(&self) -> bool {
-        ProviderKind::ALL.iter().any(|p| self.api_key_present_for(*p))
+        ProviderKind::ALL
+            .iter()
+            .any(|p| self.api_key_present_for(*p))
     }
 }
 

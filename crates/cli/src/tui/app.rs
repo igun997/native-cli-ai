@@ -2797,16 +2797,22 @@ pub fn run_blocking(
                             (KeyCode::Enter, _) => {
                                 if g.onboarding_mode {
                                     // Block input while validation is in flight
-                                    if matches!(g.validation_status, Some(crate::tui::state::OnboardingValidation::Validating)) {
+                                    if matches!(
+                                        g.validation_status,
+                                        Some(crate::tui::state::OnboardingValidation::Validating)
+                                    ) {
                                         // Already validating — ignore
                                     } else if let Some(provider) = g.api_key_target_provider {
                                         let key = g.api_key_input.trim().to_string();
                                         if key.is_empty() {
                                             // Don't submit empty keys during onboarding
                                         } else {
-                                            g.validation_status = Some(crate::tui::state::OnboardingValidation::Validating);
+                                            g.validation_status = Some(
+                                                crate::tui::state::OnboardingValidation::Validating,
+                                            );
                                             drop(g);
-                                            let _ = cmd_tx.send(TuiCmd::ValidateApiKey(provider, key));
+                                            let _ =
+                                                cmd_tx.send(TuiCmd::ValidateApiKey(provider, key));
                                         }
                                     }
                                 } else {
@@ -3163,7 +3169,10 @@ pub fn run_blocking(
                                 g.cursor_char_idx = 0;
                                 drop(g);
                                 if let Some(ref tx) = approval_answer_tx {
-                                    let _ = tx.send(ApprovalAnswer::Verdict { call_id, approved: true });
+                                    let _ = tx.send(ApprovalAnswer::Verdict {
+                                        call_id,
+                                        approved: true,
+                                    });
                                 }
                                 continue;
                             }
@@ -3175,7 +3184,10 @@ pub fn run_blocking(
                                 g.cursor_char_idx = 0;
                                 drop(g);
                                 if let Some(ref tx) = approval_answer_tx {
-                                    let _ = tx.send(ApprovalAnswer::Verdict { call_id, approved: false });
+                                    let _ = tx.send(ApprovalAnswer::Verdict {
+                                        call_id,
+                                        approved: false,
+                                    });
                                 }
                                 continue;
                             }
@@ -3188,12 +3200,13 @@ pub fn run_blocking(
                                 let call_id = req.call_id.clone();
                                 g.input_buffer.clear();
                                 g.cursor_char_idx = 0;
-                                g.blocks.push(DisplayBlock::System(
-                                    format!("Always allowing: {pattern}"),
-                                ));
+                                g.blocks.push(DisplayBlock::System(format!(
+                                    "Always allowing: {pattern}"
+                                )));
                                 drop(g);
                                 if let Some(ref tx) = approval_answer_tx {
-                                    let _ = tx.send(ApprovalAnswer::AllowPattern { call_id, pattern });
+                                    let _ =
+                                        tx.send(ApprovalAnswer::AllowPattern { call_id, pattern });
                                 }
                                 continue;
                             }
@@ -3224,7 +3237,10 @@ pub fn run_blocking(
                                         let call_id = req.call_id.clone();
                                         drop(g);
                                         if let Some(ref tx) = approval_answer_tx {
-                                            let _ = tx.send(ApprovalAnswer::Verdict { call_id, approved });
+                                            let _ = tx.send(ApprovalAnswer::Verdict {
+                                                call_id,
+                                                approved,
+                                            });
                                         } else {
                                             let _ = cmd_tx.send(TuiCmd::CancelTurn);
                                         }
@@ -3238,7 +3254,8 @@ pub fn run_blocking(
                                     let call_id = req.call_id.clone();
                                     drop(g);
                                     if let Some(ref tx) = approval_answer_tx {
-                                        let _ = tx.send(ApprovalAnswer::Verdict { call_id, approved });
+                                        let _ =
+                                            tx.send(ApprovalAnswer::Verdict { call_id, approved });
                                     } else {
                                         let _ = cmd_tx.send(TuiCmd::CancelTurn);
                                     }

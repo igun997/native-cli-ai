@@ -1046,7 +1046,11 @@ impl IpcApprovalHandler {
 
 #[async_trait::async_trait]
 impl ApprovalHandler for IpcApprovalHandler {
-    async fn resolve(&self, call: &nca_common::tool::ToolCall, _description: &str) -> ApprovalVerdict {
+    async fn resolve(
+        &self,
+        call: &nca_common::tool::ToolCall,
+        _description: &str,
+    ) -> ApprovalVerdict {
         let (tx, rx) = oneshot::channel();
         {
             let mut m = self.pending.lock().unwrap();
@@ -1068,7 +1072,11 @@ struct AutoDenyHandler;
 
 #[async_trait::async_trait]
 impl ApprovalHandler for AutoDenyHandler {
-    async fn resolve(&self, _call: &nca_common::tool::ToolCall, _description: &str) -> ApprovalVerdict {
+    async fn resolve(
+        &self,
+        _call: &nca_common::tool::ToolCall,
+        _description: &str,
+    ) -> ApprovalVerdict {
         ApprovalVerdict::Denied
     }
 }

@@ -603,79 +603,10 @@ async fn try_main() -> anyhow::Result<()> {
                 }
 
                 if cli.resume {
-                if let Some(mode) = cli.permission_mode {
-                    config.permissions.mode = mode.into();
-                }
-                let session_id = latest_session_id(&config, &workspace_root).await?;
-                resume_session(
-                    config,
-                    &workspace_root,
-                    &session_id,
-                    None,
-                    cli.safe,
-                    cli.stream,
-                    cli.no_tui,
-                )
-                .await?;
-            } else if cli.no_resume {
-                // Explicitly skip auto-resume; create a fresh session.
-                if cli.run {
-                    eprintln!("[run-mode] interactive run profile enabled");
-                }
-                if let Some(mode) = cli.permission_mode {
-                    config.permissions.mode = mode.into();
-                }
-                let use_tui = !cli.no_tui
-                    && stdout().is_terminal()
-                    && stdin().is_terminal()
-                    && matches!(cli.stream, StreamMode::Human);
-                let approval_handler: Option<
-                    std::sync::Arc<dyn nca_core::approval::ApprovalHandler>,
-                > = if use_tui {
-                    None
-                } else {
-                    Some(InteractiveIpcApprovalHandler::new())
-                };
-                let mut runtime = build_session_runtime(
-                    config.clone(),
-                    &workspace_root,
-                    cli.safe,
-                    true,
-                    cli.session_id,
-                    approval_handler,
-                    orchestration_context.clone(),
-                )
-                .await
-                .map_err(anyhow::Error::msg)?;
-                if !use_tui && let Some(rx) = runtime.take_event_rx() {
-                    let ipc_handle = runtime.take_ipc_handle();
-                    let approval_pending = runtime.take_ipc_approval_pending();
-                    let _stream_task = spawn_stream_task(
-                        rx,
-                        cli.stream,
-                        runtime.event_log_path(),
-                        ipc_handle,
-                        approval_pending,
-                        runtime.question_pending(),
-                        None,
-                    );
-                }
-                let mut repl = Repl::new(runtime, cli.safe, cli.run);
-                if use_tui {
-                    repl.run_with_tui().await?;
-                } else {
-                    repl.run().await?;
-                }
-            } else {
-                // Auto-resume: if a last-session pointer exists and points to a valid session,
-                // resume it silently instead of creating a new session.
-                if let Ok(Some(session_id)) =
-                    nca_runtime::supervisor::get_last_session_id(&config, &workspace_root).await
-                {
-                    eprintln!(
-                        "[session] Resuming last session {} (use --no-resume to start fresh)",
-                        session_id
-                    );
+                    if let Some(mode) = cli.permission_mode {
+                        config.permissions.mode = mode.into();
+                    }
+                    let session_id = latest_session_id(&config, &workspace_root).await?;
                     resume_session(
                         config,
                         &workspace_root,
@@ -686,7 +617,8 @@ async fn try_main() -> anyhow::Result<()> {
                         cli.no_tui,
                     )
                     .await?;
-                } else {
+                } else if cli.no_resume {
+                    // Explicitly skip auto-resume; create a fresh session.
                     if cli.run {
                         eprintln!("[run-mode] interactive run profile enabled");
                     }
@@ -734,8 +666,76 @@ async fn try_main() -> anyhow::Result<()> {
                     } else {
                         repl.run().await?;
                     }
+                } else {
+                    // Auto-resume: if a last-session pointer exists and points to a valid session,
+                    // resume it silently instead of creating a new session.
+                    if let Ok(Some(session_id)) =
+                        nca_runtime::supervisor::get_last_session_id(&config, &workspace_root).await
+                    {
+                        eprintln!(
+                            "[session] Resuming last session {} (use --no-resume to start fresh)",
+                            session_id
+                        );
+                        resume_session(
+                            config,
+                            &workspace_root,
+                            &session_id,
+                            None,
+                            cli.safe,
+                            cli.stream,
+                            cli.no_tui,
+                        )
+                        .await?;
+                    } else {
+                        if cli.run {
+                            eprintln!("[run-mode] interactive run profile enabled");
+                        }
+                        if let Some(mode) = cli.permission_mode {
+                            config.permissions.mode = mode.into();
+                        }
+                        let use_tui = !cli.no_tui
+                            && stdout().is_terminal()
+                            && stdin().is_terminal()
+                            && matches!(cli.stream, StreamMode::Human);
+                        let approval_handler: Option<
+                            std::sync::Arc<dyn nca_core::approval::ApprovalHandler>,
+                        > = if use_tui {
+                            None
+                        } else {
+                            Some(InteractiveIpcApprovalHandler::new())
+                        };
+                        let mut runtime = build_session_runtime(
+                            config.clone(),
+                            &workspace_root,
+                            cli.safe,
+                            true,
+                            cli.session_id,
+                            approval_handler,
+                            orchestration_context.clone(),
+                        )
+                        .await
+                        .map_err(anyhow::Error::msg)?;
+                        if !use_tui && let Some(rx) = runtime.take_event_rx() {
+                            let ipc_handle = runtime.take_ipc_handle();
+                            let approval_pending = runtime.take_ipc_approval_pending();
+                            let _stream_task = spawn_stream_task(
+                                rx,
+                                cli.stream,
+                                runtime.event_log_path(),
+                                ipc_handle,
+                                approval_pending,
+                                runtime.question_pending(),
+                                None,
+                            );
+                        }
+                        let mut repl = Repl::new(runtime, cli.safe, cli.run);
+                        if use_tui {
+                            repl.run_with_tui().await?;
+                        } else {
+                            repl.run().await?;
+                        }
+                    }
                 }
-            }
             }
         }
     }

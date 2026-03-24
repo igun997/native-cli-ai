@@ -62,9 +62,7 @@ pub async fn validate_api_key(
             if status.is_success() {
                 ValidationResult::Valid
             } else if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                ValidationResult::InvalidKey(
-                    "Invalid API key — please check and try again".into(),
-                )
+                ValidationResult::InvalidKey("Invalid API key — please check and try again".into())
             } else {
                 // Some providers return 400 for minimal requests but the key is valid.
                 // A 400 with auth headers accepted means the key works.

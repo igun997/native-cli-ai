@@ -9,14 +9,14 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use nca_common::config::{NcaConfig, ProviderKind};
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
 
 use super::app::{restore_terminal, setup_terminal};
-use super::connect_modal::{build_connect_rows, selectable_row_indices, ConnectRow};
+use super::connect_modal::{ConnectRow, build_connect_rows, selectable_row_indices};
 use super::state::OnboardingValidation;
 
 /// Shared validation state updated by the background task.
@@ -144,15 +144,13 @@ async fn run_onboarding_inner(
                                 }
 
                                 // Spawn background validation task
-                                let base_url =
-                                    config.provider.base_url_for(provider).to_string();
+                                let base_url = config.provider.base_url_for(provider).to_string();
                                 let vs = validation_state.clone();
                                 tokio::spawn(async move {
-                                    let result =
-                                        nca_core::provider::validate::validate_api_key(
-                                            provider, &key_str, &base_url,
-                                        )
-                                        .await;
+                                    let result = nca_core::provider::validate::validate_api_key(
+                                        provider, &key_str, &base_url,
+                                    )
+                                    .await;
                                     if let Ok(mut g) = vs.lock() {
                                         *g = Some(match result {
                                             nca_core::provider::validate::ValidationResult::Valid => {
@@ -284,8 +282,7 @@ fn render_connect_modal(f: &mut Frame, area: Rect, search: &str, selected: usize
             ConnectRow::Provider {
                 title, subtitle, ..
             } => {
-                let is_selected =
-                    sel_indices.iter().position(|&si| si == i) == Some(selected);
+                let is_selected = sel_indices.iter().position(|&si| si == i) == Some(selected);
                 let style = if is_selected {
                     Style::default().fg(Color::Black).bg(Color::White)
                 } else {
@@ -345,14 +342,8 @@ fn render_api_key_modal(
         Some(OnboardingValidation::Validating) => {
             let frame = SPINNER_FRAMES[spinner_idx];
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{frame} "),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::styled(
-                    "Validating API key...",
-                    Style::default().fg(Color::Yellow),
-                ),
+                Span::styled(format!("{frame} "), Style::default().fg(Color::Cyan)),
+                Span::styled("Validating API key...", Style::default().fg(Color::Yellow)),
             ]));
         }
         Some(OnboardingValidation::Failed(msg)) => {

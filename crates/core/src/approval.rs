@@ -13,7 +13,10 @@ pub enum ApprovalVerdict {
 
 impl ApprovalVerdict {
     pub fn is_approved(&self) -> bool {
-        matches!(self, ApprovalVerdict::Approved | ApprovalVerdict::AllowPattern(_))
+        matches!(
+            self,
+            ApprovalVerdict::Approved | ApprovalVerdict::AllowPattern(_)
+        )
     }
 }
 
@@ -125,16 +128,17 @@ impl ApprovalPolicy {
         let json_key = format!("{tool_name}:{description}");
 
         // Build a human-readable key by extracting meaningful text from JSON input
-        let readable_key = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(description) {
-            let text = extract_meaningful_text(&parsed);
-            if text.is_empty() {
-                json_key.clone()
+        let readable_key =
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(description) {
+                let text = extract_meaningful_text(&parsed);
+                if text.is_empty() {
+                    json_key.clone()
+                } else {
+                    format!("{tool_name}:{text}")
+                }
             } else {
-                format!("{tool_name}:{text}")
-            }
-        } else {
-            json_key.clone()
-        };
+                json_key.clone()
+            };
 
         // Deny check: match against both keys
         for pattern in &self.config.deny {
@@ -149,7 +153,9 @@ impl ApprovalPolicy {
             .allow
             .iter()
             .chain(self.session_allow.iter())
-            .any(|pattern| wildcard_matches(pattern, &json_key) || wildcard_matches(pattern, &readable_key));
+            .any(|pattern| {
+                wildcard_matches(pattern, &json_key) || wildcard_matches(pattern, &readable_key)
+            });
 
         let readonly = matches!(
             tool_name,
@@ -244,9 +250,18 @@ mod tests {
 
     #[test]
     fn wildcard_matches_trailing_star() {
-        assert!(wildcard_matches("execute_bash:git *", "execute_bash:git status"));
-        assert!(wildcard_matches("execute_bash:git *", "execute_bash:git push --force"));
-        assert!(!wildcard_matches("execute_bash:git *", "execute_bash:npm install"));
+        assert!(wildcard_matches(
+            "execute_bash:git *",
+            "execute_bash:git status"
+        ));
+        assert!(wildcard_matches(
+            "execute_bash:git *",
+            "execute_bash:git push --force"
+        ));
+        assert!(!wildcard_matches(
+            "execute_bash:git *",
+            "execute_bash:npm install"
+        ));
     }
 
     #[test]
@@ -263,8 +278,14 @@ mod tests {
 
     #[test]
     fn wildcard_matches_exact() {
-        assert!(wildcard_matches("execute_bash:git status", "execute_bash:git status"));
-        assert!(!wildcard_matches("execute_bash:git status", "execute_bash:git push"));
+        assert!(wildcard_matches(
+            "execute_bash:git status",
+            "execute_bash:git status"
+        ));
+        assert!(!wildcard_matches(
+            "execute_bash:git status",
+            "execute_bash:git push"
+        ));
     }
 
     #[test]
@@ -279,8 +300,14 @@ mod tests {
 
     #[test]
     fn wildcard_matches_tool_level() {
-        assert!(wildcard_matches("execute_bash:*", "execute_bash:git status"));
-        assert!(!wildcard_matches("execute_bash:*", "write_file:src/main.rs"));
+        assert!(wildcard_matches(
+            "execute_bash:*",
+            "execute_bash:git status"
+        ));
+        assert!(!wildcard_matches(
+            "execute_bash:*",
+            "write_file:src/main.rs"
+        ));
     }
 
     #[test]
@@ -351,7 +378,10 @@ mod tests {
         let mut policy = ApprovalPolicy::new(config);
         policy.add_session_allow("execute_bash:git *".into());
 
-        let tier = policy.check("execute_bash", &serde_json::json!({"command": "git status"}).to_string());
+        let tier = policy.check(
+            "execute_bash",
+            &serde_json::json!({"command": "git status"}).to_string(),
+        );
         assert_eq!(tier, PermissionTier::Allowed);
     }
 
@@ -361,7 +391,10 @@ mod tests {
         let mut policy = ApprovalPolicy::new(config);
         policy.add_session_allow("execute_bash:git *".into());
 
-        let tier = policy.check("execute_bash", &serde_json::json!({"command": "npm install"}).to_string());
+        let tier = policy.check(
+            "execute_bash",
+            &serde_json::json!({"command": "npm install"}).to_string(),
+        );
         assert_ne!(tier, PermissionTier::Allowed);
     }
 
@@ -381,7 +414,10 @@ mod tests {
             ..Default::default()
         };
         let policy = ApprovalPolicy::new(config);
-        let tier = policy.check("execute_bash", &serde_json::json!({"command": "git status"}).to_string());
+        let tier = policy.check(
+            "execute_bash",
+            &serde_json::json!({"command": "git status"}).to_string(),
+        );
         assert_eq!(tier, PermissionTier::Allowed);
     }
 
@@ -392,7 +428,10 @@ mod tests {
             ..Default::default()
         };
         let policy = ApprovalPolicy::new(config);
-        let tier = policy.check("execute_bash", &serde_json::json!({"command": "rm -rf /"}).to_string());
+        let tier = policy.check(
+            "execute_bash",
+            &serde_json::json!({"command": "rm -rf /"}).to_string(),
+        );
         assert_eq!(tier, PermissionTier::Denied);
     }
 }

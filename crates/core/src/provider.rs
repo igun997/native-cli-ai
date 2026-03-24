@@ -6,9 +6,9 @@ pub mod minimax_vlm;
 pub mod openai;
 pub mod openai_compat;
 pub mod openrouter;
-pub mod validate;
 #[cfg(test)]
 pub mod test_support;
+pub mod validate;
 
 use std::path::Path;
 

@@ -189,7 +189,11 @@ impl ApprovalHandler for InteractiveIpcApprovalHandler {
             Ok(Ok(approved)) => {
                 let mut m = self.pending.lock().await;
                 m.remove(&call.id);
-                if approved { ApprovalVerdict::Approved } else { ApprovalVerdict::Denied }
+                if approved {
+                    ApprovalVerdict::Approved
+                } else {
+                    ApprovalVerdict::Denied
+                }
             }
             _ => {
                 let mut m = self.pending.lock().await;

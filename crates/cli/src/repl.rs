@@ -5,12 +5,12 @@ use crate::file_mentions::{
 use crate::prompt::NcaPrompt;
 use crate::runner::{SessionRuntime, dispatch_question_answer, dispatch_tool_approval};
 use crate::slash_commands::SLASH_COMMANDS;
+use crate::tui::app::ApprovalAnswer;
 use crate::tui::{
     DisplayBlock, ModelPickerAction, ModelPickerEntry, TuiCmd, TuiSessionState, git_create_branch,
     git_current_branch, git_list_branches, git_switch_branch, replay_event_log_into_state,
     run_blocking, spawn_tui_bridge,
 };
-use crate::tui::app::ApprovalAnswer;
 use nca_common::config::{PermissionMode, ProviderKind};
 use nca_common::event::{EndReason, QuestionSelection};
 use nca_core::skills::SkillCatalog;
@@ -1893,35 +1893,48 @@ impl Repl {
                 TuiCmd::ValidateApiKey(provider, api_key) => {
                     // Set validating state
                     if let Ok(mut g) = tui_state.lock() {
-                        g.validation_status = Some(crate::tui::state::OnboardingValidation::Validating);
+                        g.validation_status =
+                            Some(crate::tui::state::OnboardingValidation::Validating);
                     }
                     // Look up base_url from config
-                    let base_url = self.runtime.config().provider.base_url_for(provider).to_string();
+                    let base_url = self
+                        .runtime
+                        .config()
+                        .provider
+                        .base_url_for(provider)
+                        .to_string();
                     // Run async validation
                     let result = nca_core::provider::validate::validate_api_key(
-                        provider,
-                        &api_key,
-                        &base_url,
-                    ).await;
+                        provider, &api_key, &base_url,
+                    )
+                    .await;
                     if let Ok(mut g) = tui_state.lock() {
                         match &result {
                             nca_core::provider::validate::ValidationResult::Valid => {
                                 // Save key and complete onboarding
-                                g.validation_status = Some(crate::tui::state::OnboardingValidation::Valid);
+                                g.validation_status =
+                                    Some(crate::tui::state::OnboardingValidation::Valid);
                                 g.close_api_key_modal();
                                 g.close_connect_modal();
                                 g.onboarding_mode = false;
                             }
                             nca_core::provider::validate::ValidationResult::InvalidKey(msg) => {
-                                g.validation_status = Some(crate::tui::state::OnboardingValidation::Failed(msg.clone()));
+                                g.validation_status = Some(
+                                    crate::tui::state::OnboardingValidation::Failed(msg.clone()),
+                                );
                             }
                             nca_core::provider::validate::ValidationResult::NetworkError(msg) => {
-                                g.validation_status = Some(crate::tui::state::OnboardingValidation::Failed(msg.clone()));
+                                g.validation_status = Some(
+                                    crate::tui::state::OnboardingValidation::Failed(msg.clone()),
+                                );
                             }
                         }
                     }
                     // If validation succeeded, save key + complete onboarding
-                    if matches!(result, nca_core::provider::validate::ValidationResult::Valid) {
+                    if matches!(
+                        result,
+                        nca_core::provider::validate::ValidationResult::Valid
+                    ) {
                         // Apply key + switch provider in one step
                         let mut cfg = self.runtime.config().clone();
                         cfg.set_provider_api_key(provider, &api_key);
@@ -1929,9 +1942,10 @@ impl Repl {
                         if let Err(e) = self.runtime.apply_nca_config(cfg) {
                             tracing::warn!("onboarding: provider apply failed: {e}");
                             if let Ok(mut g) = tui_state.lock() {
-                                g.validation_status = Some(crate::tui::state::OnboardingValidation::Failed(
-                                    format!("Failed to apply provider: {e}"),
-                                ));
+                                g.validation_status =
+                                    Some(crate::tui::state::OnboardingValidation::Failed(format!(
+                                        "Failed to apply provider: {e}"
+                                    )));
                                 g.onboarding_mode = true;
                             }
                             continue;
