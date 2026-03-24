@@ -1798,7 +1798,7 @@ pub fn run_blocking(
                         "Approval: y/n · Ctrl+Y approve · Ctrl+N deny · Ctrl+U always allow · /approve · /deny · other /commands still work",
                         Style::default().fg(theme::ERROR),
                     ))
-                } else if g.active_question.is_some() {
+                } else if g.active_question.is_some() && !g.question_modal_open {
                     Line::from(Span::styled(
                         "Enter / 0 = suggested · 1–n = option · click underlined line · /auto-answer · End = transcript bottom (empty input)",
                         Style::default().fg(theme::WARN),
@@ -2133,6 +2133,113 @@ pub fn run_blocking(
                         .style(Style::default().bg(theme::SURFACE))
                         .wrap(Wrap { trim: false });
                     frame.render_widget(popup, popup_area);
+                }
+
+                // Question modal popup (arrow-key option picker).
+                if g.question_modal_open
+                    && let Some(ref q) = g.active_question
+                {
+                        let has_chat_option = q.allow_custom;
+                        let total_items = 1 + q.options.len() + if has_chat_option { 1 } else { 0 };
+                        // +4 for: title line, blank, blank before footer, footer
+                        let rows = (total_items as u16).saturating_add(6).max(8);
+                        let popup_w = 60u16.min(area.width.saturating_sub(4));
+                        let popup_area = centered_rect(area, popup_w, rows);
+
+                        let mut lines: Vec<Line> = vec![
+                            Line::from(Span::styled(
+                                format!(" {} ", q.prompt),
+                                Style::default()
+                                    .fg(theme::ASSISTANT)
+                                    .add_modifier(Modifier::BOLD),
+                            )),
+                            Line::default(),
+                        ];
+
+                        // Suggested answer (index 0)
+                        let suggested_label = format!(" Suggested: {} ", q.suggested_answer);
+                        if g.question_modal_index == 0 {
+                            lines.push(Line::from(Span::styled(
+                                format!(" ► {}", suggested_label.trim()),
+                                Style::default()
+                                    .fg(Color::Black)
+                                    .bg(theme::USER)
+                                    .add_modifier(Modifier::BOLD),
+                            )));
+                        } else {
+                            lines.push(Line::from(Span::styled(
+                                format!("   {}", suggested_label.trim()),
+                                Style::default().fg(theme::TEXT),
+                            )));
+                        }
+
+                        // Options (index 1..n)
+                        for (i, o) in q.options.iter().enumerate() {
+                            let item_idx = i + 1;
+                            let label = format!("{} ", o.label);
+                            if g.question_modal_index == item_idx {
+                                lines.push(Line::from(Span::styled(
+                                    format!(" ► {}", label.trim()),
+                                    Style::default()
+                                        .fg(Color::Black)
+                                        .bg(theme::USER)
+                                        .add_modifier(Modifier::BOLD),
+                                )));
+                            } else {
+                                lines.push(Line::from(Span::styled(
+                                    format!("   {}", label.trim()),
+                                    Style::default().fg(theme::TEXT),
+                                )));
+                            }
+                        }
+
+                        // "Chat about this" (last item, only if allow_custom)
+                        if has_chat_option {
+                            let chat_idx = 1 + q.options.len();
+                            if g.question_modal_index == chat_idx {
+                                lines.push(Line::from(Span::styled(
+                                    " ► Chat about this",
+                                    Style::default()
+                                        .fg(Color::Black)
+                                        .bg(theme::USER)
+                                        .add_modifier(Modifier::BOLD),
+                                )));
+                            } else {
+                                lines.push(Line::from(Span::styled(
+                                    "   Chat about this",
+                                    Style::default()
+                                        .fg(theme::MUTED)
+                                        .add_modifier(Modifier::ITALIC),
+                                )));
+                            }
+                        }
+
+                        // Footer
+                        lines.push(Line::default());
+                        let footer_text = if has_chat_option {
+                            " ↑↓ select · Enter confirm · Esc chat "
+                        } else {
+                            " ↑↓ select · Enter confirm "
+                        };
+                        lines.push(Line::from(Span::styled(
+                            footer_text,
+                            Style::default().fg(theme::MUTED),
+                        )));
+
+                        frame.render_widget(ClearWidget, popup_area);
+                        let popup = Paragraph::new(Text::from(lines))
+                            .block(
+                                Block::default()
+                                    .borders(Borders::ALL)
+                                    .border_style(Style::default().fg(theme::BORDER))
+                                    .title(Span::styled(
+                                        " question ",
+                                        Style::default().fg(theme::WARN),
+                                    )),
+                            )
+                            .style(Style::default().bg(theme::SURFACE))
+                            .wrap(Wrap { trim: false });
+                        frame.render_widget(popup, popup_area);
                 }
 
                 if g.session_picker_open {
