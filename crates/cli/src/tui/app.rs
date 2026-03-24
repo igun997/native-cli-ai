@@ -2597,6 +2597,7 @@ pub fn run_blocking(
                 Event::Mouse(_) if g.permission_picker_open => continue,
                 Event::Mouse(_) if g.agent_picker_open => continue,
                 Event::Mouse(_) if g.session_picker_open => continue,
+                Event::Mouse(_) if g.question_modal_open => continue,
                 Event::Mouse(m) => {
                     let sz = terminal.size()?;
                     let area = Rect::new(0, 0, sz.width, sz.height);
@@ -3056,6 +3057,63 @@ pub fn run_blocking(
                                 g.branch_picker_index = 0;
                             }
                             _ => {}
+                        }
+                        continue;
+                    }
+
+                    // Question modal keyboard handling.
+                    if g.question_modal_open {
+                        if let Some(ref q) = g.active_question.clone() {
+                            // Total items: 1 (suggested) + options.len() + (1 if allow_custom for "Chat about this")
+                            let total = 1 + q.options.len() + if q.allow_custom { 1 } else { 0 };
+                            match (key.code, key.modifiers) {
+                                (KeyCode::Esc, _) => {
+                                    if q.allow_custom {
+                                        // Fall back to inline text input
+                                        g.close_question_modal();
+                                    }
+                                    // If !allow_custom, Esc is a no-op
+                                }
+                                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                                    g.question_modal_index =
+                                        g.question_modal_index.saturating_sub(1);
+                                }
+                                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                                    g.question_modal_index =
+                                        (g.question_modal_index + 1).min(total - 1);
+                                }
+                                (KeyCode::Enter, _) => {
+                                    let idx = g.question_modal_index;
+                                    let sel = if idx == 0 {
+                                        // Suggested answer
+                                        Some(QuestionSelection::Suggested)
+                                    } else if idx <= q.options.len() {
+                                        // Regular option (1-based → 0-based)
+                                        Some(QuestionSelection::Option {
+                                            option_id: q.options[idx - 1].id.clone(),
+                                        })
+                                    } else {
+                                        // "Chat about this" — fall back to inline text input
+                                        None
+                                    };
+
+                                    if let Some(sel) = sel {
+                                        let qid = q.question_id.clone();
+                                        g.close_question_modal();
+                                        g.active_question = None;
+                                        drop(g);
+                                        if let Some(ref tx) = question_answer_tx {
+                                            let _ = tx.send((qid, sel));
+                                        } else {
+                                            let _ = cmd_tx.send(TuiCmd::QuestionAnswer(sel));
+                                        }
+                                    } else {
+                                        // "Chat about this" — close modal, keep active_question
+                                        g.close_question_modal();
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                         continue;
                     }
