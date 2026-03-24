@@ -142,7 +142,7 @@ fn skills_section(
         section.push('\n');
     }
     section.push_str(
-        "\nUse these skill summaries when relevant. Full skill instructions are loaded only when explicitly invoked by the user or REPL.",
+        "\nUse the invoke_skill tool to load full instructions when a task matches a skill.",
     );
     Some(section)
 }
