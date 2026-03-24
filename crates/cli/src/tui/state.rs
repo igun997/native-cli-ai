@@ -897,4 +897,76 @@ mod tests {
         assert!(st.active_approval.is_none());
         assert!(st.active_question.is_none());
     }
+
+    #[test]
+    fn open_close_question_modal() {
+        let mut st = TuiSessionState::new(
+            "s".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+        );
+        assert!(!st.question_modal_open);
+        assert_eq!(st.question_modal_index, 0);
+
+        st.open_question_modal();
+        assert!(st.question_modal_open);
+        assert_eq!(st.question_modal_index, 0);
+        assert_eq!(st.question_modal_scroll, 0);
+
+        st.question_modal_index = 3;
+        st.close_question_modal();
+        assert!(!st.question_modal_open);
+        assert_eq!(st.question_modal_index, 0);
+        assert_eq!(st.question_modal_scroll, 0);
+    }
+
+    #[test]
+    fn question_requested_opens_modal() {
+        let mut st = TuiSessionState::new(
+            "s".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+        );
+        let q = InteractiveQuestionPayload {
+            question_id: "q-1".into(),
+            call_id: "c1".into(),
+            prompt: "Pick".into(),
+            options: vec![QuestionOption {
+                id: "a".into(),
+                label: "A".into(),
+            }],
+            allow_custom: true,
+            suggested_answer: "A".into(),
+        };
+        st.apply_event(&AgentEvent::QuestionRequested {
+            question: q.clone(),
+        });
+        assert!(st.question_modal_open);
+        assert_eq!(st.question_modal_index, 0);
+        assert!(st.active_question.is_some());
+    }
+
+    #[test]
+    fn question_resolved_closes_modal() {
+        let mut st = TuiSessionState::new(
+            "s".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+        );
+        st.question_modal_open = true;
+        st.question_modal_index = 2;
+        st.apply_event(&AgentEvent::QuestionResolved {
+            question_id: "q-1".into(),
+            selection: QuestionSelection::Suggested,
+        });
+        assert!(st.active_question.is_none());
+        assert!(!st.question_modal_open);
+        assert_eq!(st.question_modal_index, 0);
+    }
 }
