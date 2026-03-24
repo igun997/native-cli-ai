@@ -144,6 +144,22 @@ impl ContextManager {
             .collect()
     }
 
+    /// Adjust a cutoff index so it never lands inside a tool_use/tool_result group.
+    /// If the message at `cutoff` is a Role::Tool, walk backwards to include the
+    /// preceding assistant message that contains the matching tool_calls.
+    /// `min_cutoff` prevents walking past system messages.
+    fn adjust_cutoff_for_tool_groups(
+        messages: &[Message],
+        mut cutoff: usize,
+        min_cutoff: usize,
+    ) -> usize {
+        while cutoff > min_cutoff && cutoff < messages.len() && messages[cutoff].role == Role::Tool
+        {
+            cutoff -= 1;
+        }
+        cutoff
+    }
+
     /// Check if the context needs compaction.
     pub fn needs_compaction(&self, messages: &[Message]) -> bool {
         let stats = self.stats(messages);
@@ -217,8 +233,9 @@ impl ContextManager {
             return messages.to_vec();
         };
 
-        // Get recent messages to keep (everything after the summarize range)
-        let recent_start = range.end;
+        // Get recent messages to keep (everything after the summarize range).
+        // Adjust to avoid splitting tool_use/tool_result groups.
+        let recent_start = Self::adjust_cutoff_for_tool_groups(messages, range.end, system_count);
 
         // Build new message list: system + summary + recent
         let mut result = Vec::with_capacity(system_count + 10);
@@ -247,6 +264,7 @@ impl ContextManager {
 
     /// Get a sliding window of recent messages for context.
     /// Preserves system messages and keeps recent conversation.
+    /// Ensures tool_use/tool_result groups are never split.
     pub fn get_sliding_window(
         &self,
         messages: &[Message],
@@ -262,6 +280,7 @@ impl ContextManager {
         // Keep system messages + last (max - system_count) messages
         let keep_count = max.saturating_sub(system_count);
         let cutoff = messages.len() - keep_count;
+        let cutoff = Self::adjust_cutoff_for_tool_groups(messages, cutoff, system_count);
 
         let mut result: Vec<Message> = messages[..system_count].to_vec();
         result.extend_from_slice(&messages[cutoff..]);
@@ -451,5 +470,151 @@ mod tests {
                 .iter()
                 .any(|m| m.content.to_summary_text().contains("Conversation Summary"))
         );
+    }
+
+    use nca_common::message::MessageToolCall;
+
+    fn make_tool_call(id: &str, name: &str) -> MessageToolCall {
+        MessageToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: serde_json::json!({}),
+        }
+    }
+
+    /// Helper: assert no Role::Tool message appears without its matching
+    /// assistant tool_use in the preceding assistant message.
+    fn assert_no_orphaned_tool_results(messages: &[Message]) {
+        let mut expected_tool_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for msg in messages {
+            match msg.role {
+                Role::Assistant => {
+                    expected_tool_ids.clear();
+                    if let Some(calls) = &msg.tool_calls {
+                        for call in calls {
+                            expected_tool_ids.insert(call.id.clone());
+                        }
+                    }
+                }
+                Role::Tool => {
+                    let id = msg.tool_call_id.as_deref().unwrap_or("");
+                    assert!(
+                        expected_tool_ids.contains(id),
+                        "Orphaned tool_result with id '{}' — no matching tool_use in preceding assistant message. Messages: {:?}",
+                        id,
+                        messages
+                            .iter()
+                            .map(|m| (&m.role, m.tool_call_id.as_deref()))
+                            .collect::<Vec<_>>()
+                    );
+                }
+                _ => {
+                    expected_tool_ids.clear();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sliding_window_preserves_tool_use_result_pairs() {
+        // max_retained=4: cutoff would land on tool result msg if naive
+        let config = ContextManagerConfig {
+            context_window_target: 32_000,
+            max_retained_messages: 4,
+            auto_summarize_threshold: 75,
+            enable_auto_summarize: true,
+            max_message_chars_for_summary: 10_000,
+        };
+        let manager = ContextManager::new(config, "test-model".to_string());
+
+        // 10 messages: user, assistant+tool_calls, tool_result, user, ...
+        let messages = vec![
+            make_message(Role::System, "system prompt"),
+            make_message(Role::User, "msg 1"),
+            make_message(Role::Assistant, "reply 1"),
+            make_message(Role::User, "msg 2"),
+            // This is the critical group: assistant calls tool, then tool result
+            Message::assistant_with_tool_calls(
+                "Let me check",
+                vec![make_tool_call("call-1", "read_file")],
+            ),
+            Message::tool("call-1", "file contents here"),
+            // After tool result
+            make_message(Role::User, "msg 3"),
+            make_message(Role::Assistant, "final reply"),
+        ];
+
+        let window = manager.get_sliding_window(&messages, None);
+
+        // The window must never contain an orphaned tool_result
+        assert_no_orphaned_tool_results(&window);
+    }
+
+    #[test]
+    fn apply_summary_preserves_tool_use_result_pairs() {
+        // max_retained=3: cutoff lands right on the tool_result
+        let config = ContextManagerConfig {
+            context_window_target: 32_000,
+            max_retained_messages: 3,
+            auto_summarize_threshold: 75,
+            enable_auto_summarize: true,
+            max_message_chars_for_summary: 10_000,
+        };
+        let manager = ContextManager::new(config, "test-model".to_string());
+
+        let messages = vec![
+            make_message(Role::System, "system prompt"),
+            make_message(Role::User, "msg 1"),
+            make_message(Role::Assistant, "reply 1"),
+            make_message(Role::User, "msg 2"),
+            // Tool use group that straddles the naive cutoff
+            Message::assistant_with_tool_calls(
+                "Running tool",
+                vec![make_tool_call("call-2", "bash")],
+            ),
+            Message::tool("call-2", "ok"),
+            make_message(Role::User, "msg 3"),
+            make_message(Role::Assistant, "done"),
+        ];
+
+        let result = manager.apply_summary(&messages, "Earlier conversation summary.");
+
+        assert_no_orphaned_tool_results(&result);
+    }
+
+    #[test]
+    fn sliding_window_preserves_multi_tool_call_group() {
+        // Assistant calls 2 tools → 2 tool results. Window must keep entire group.
+        let config = ContextManagerConfig {
+            context_window_target: 32_000,
+            max_retained_messages: 4,
+            auto_summarize_threshold: 75,
+            enable_auto_summarize: true,
+            max_message_chars_for_summary: 10_000,
+        };
+        let manager = ContextManager::new(config, "test-model".to_string());
+
+        let messages = vec![
+            make_message(Role::System, "system prompt"),
+            make_message(Role::User, "msg 1"),
+            make_message(Role::Assistant, "reply 1"),
+            make_message(Role::User, "msg 2"),
+            Message::assistant_with_tool_calls(
+                "Using two tools",
+                vec![
+                    make_tool_call("call-a", "read_file"),
+                    make_tool_call("call-b", "grep"),
+                ],
+            ),
+            Message::tool("call-a", "contents a"),
+            Message::tool("call-b", "contents b"),
+            make_message(Role::User, "msg 3"),
+            make_message(Role::Assistant, "all done"),
+        ];
+
+        let window = manager.get_sliding_window(&messages, None);
+
+        assert_no_orphaned_tool_results(&window);
     }
 }
