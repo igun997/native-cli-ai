@@ -4,6 +4,39 @@ use std::path::PathBuf;
 
 use crate::tool::ToolResult;
 
+/// Real-time busy state indicator for CLI rendering.
+/// Reflects the current processing state of the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BusyState {
+    /// Agent is idle and ready for input.
+    Idle,
+    /// Agent is thinking/planning (heavy computation, model reasoning).
+    Thinking,
+    /// Agent is streaming tokens from LLM.
+    Streaming,
+    /// Agent is executing a tool.
+    ToolRunning,
+    /// Agent is waiting for user approval on a tool call.
+    ApprovalPending,
+    /// Error or blocked state.
+    Error,
+}
+
+impl BusyState {
+    /// Human-readable label for this state.
+    pub fn label(&self) -> &'static str {
+        match self {
+            BusyState::Idle => "idle",
+            BusyState::Thinking => "thinking",
+            BusyState::Streaming => "streaming",
+            BusyState::ToolRunning => "tool",
+            BusyState::ApprovalPending => "approval",
+            BusyState::Error => "error",
+        }
+    }
+}
+
 /// Envelope for events written to disk, with stable id and timestamp for ordering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {
@@ -115,6 +148,10 @@ pub enum AgentEvent {
     ContextCompaction {
         phase: String,
         message: String,
+    },
+    /// Busy state transition (for animated indicator rendering).
+    BusyStateChanged {
+        state: BusyState,
     },
 }
 

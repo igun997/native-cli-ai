@@ -1,5 +1,5 @@
 use futures_util::future::join_all;
-use nca_common::event::AgentEvent;
+use nca_common::event::{AgentEvent, BusyState};
 use nca_common::message::{ContentPart, ImageAttachment, Message, MessageToolCall};
 use nca_common::tool::{PermissionTier, ToolCall, ToolDefinition, ToolResult};
 use serde_json::json;
@@ -129,6 +129,10 @@ impl AgentLoop {
                 )));
             }
 
+            self.emit(AgentEvent::BusyStateChanged {
+                state: BusyState::Thinking,
+            })
+            .await;
             self.emit(AgentEvent::Checkpoint {
                 phase: "provider_request".into(),
                 detail: format!("Starting model turn {turn}"),
@@ -162,6 +166,12 @@ impl AgentLoop {
                 }
                 match chunk {
                     StreamChunk::TextDelta(delta) => {
+                        if assistant_text.is_empty() {
+                            self.emit(AgentEvent::BusyStateChanged {
+                                state: BusyState::Streaming,
+                            })
+                            .await;
+                        }
                         assistant_text.push_str(&delta);
                         self.emit(AgentEvent::TokensStreamed { delta }).await;
                     }
@@ -495,6 +505,10 @@ impl AgentLoop {
             .await;
         }
 
+        self.emit(AgentEvent::BusyStateChanged {
+            state: BusyState::Idle,
+        })
+        .await;
         Ok(final_text)
     }
 

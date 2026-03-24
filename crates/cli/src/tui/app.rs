@@ -1446,11 +1446,13 @@ pub fn run_blocking(
                 }
 
                 let elapsed = g.started.elapsed().as_secs();
-                let busy = if g.busy {
-                    Span::styled(" ● busy ", Style::default().fg(theme::WARN))
-                } else {
-                    Span::styled(" ○ idle ", Style::default().fg(theme::SUCCESS))
-                };
+                let indicator_text = crate::tui::busy_indicator::render_indicator(
+                    g.current_busy_state,
+                    g.busy_state_since,
+                );
+                let indicator_color =
+                    crate::tui::busy_indicator::color_for_state(g.current_busy_state);
+                let busy = Span::styled(indicator_text, Style::default().fg(indicator_color));
                 let approval_hint = if g.active_approval.is_some() {
                     Span::styled(" !approve ", Style::default().fg(theme::ERROR))
                 } else {

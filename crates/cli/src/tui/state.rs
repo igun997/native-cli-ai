@@ -1,7 +1,7 @@
 //! Transcript + status driven by `AgentEvent`.
 
 use nca_common::config::ProviderKind;
-use nca_common::event::{AgentEvent, InteractiveQuestionPayload};
+use nca_common::event::{AgentEvent, BusyState, InteractiveQuestionPayload};
 use nca_common::message::ImageAttachment;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -85,6 +85,10 @@ pub struct TuiSessionState {
     pub cost_usd: f64,
     pub started: Instant,
     pub busy: bool,
+    /// Current busy state (for animated indicator).
+    pub current_busy_state: BusyState,
+    /// When the current busy state started (for animation frame selection).
+    pub busy_state_since: Instant,
     pub should_exit: bool,
     /// Selected row in slash-command popup (↑↓ or click).
     pub slash_menu_index: usize,
@@ -208,6 +212,8 @@ impl TuiSessionState {
             cost_usd: 0.0,
             started: Instant::now(),
             busy: false,
+            current_busy_state: BusyState::Idle,
+            busy_state_since: Instant::now(),
             should_exit: false,
             slash_menu_index: 0,
             command_palette_open: false,
@@ -380,6 +386,13 @@ impl TuiSessionState {
         self.busy = busy;
     }
 
+    pub fn set_busy_state(&mut self, state: BusyState) {
+        if self.current_busy_state != state {
+            self.current_busy_state = state;
+            self.busy_state_since = Instant::now();
+        }
+    }
+
     pub fn push_error(&mut self, msg: String) {
         self.blocks.push(DisplayBlock::ErrorLine(msg));
     }
@@ -456,15 +469,18 @@ impl TuiSessionState {
                 if role == "user" {
                     self.streaming_assistant = None;
                     self.blocks.push(DisplayBlock::User(content.clone()));
+                    self.set_busy_state(BusyState::Thinking);
                 } else if role == "assistant" {
                     self.streaming_assistant = None;
                     self.blocks.push(DisplayBlock::Assistant(content.clone()));
+                    self.set_busy_state(BusyState::Idle);
                 }
             }
             AgentEvent::TokensStreamed { delta } => {
                 self.streaming_assistant
                     .get_or_insert_with(String::new)
                     .push_str(delta);
+                self.set_busy_state(BusyState::Streaming);
             }
             AgentEvent::ToolCallStarted {
                 call_id,
@@ -477,6 +493,7 @@ impl TuiSessionState {
                     call_id: call_id.clone(),
                     input: format_tool_input_for_display(tool, input),
                 });
+                self.set_busy_state(BusyState::ToolRunning);
             }
             AgentEvent::ToolCallCompleted { call_id, output } => {
                 let ok = output.success;
@@ -484,6 +501,7 @@ impl TuiSessionState {
                     .active_approval
                     .take()
                     .filter(|req| req.call_id != *call_id);
+                self.set_busy_state(BusyState::Thinking);
                 let detail = if ok {
                     truncate(&output.output, 120)
                 } else {
@@ -532,6 +550,7 @@ impl TuiSessionState {
                     input,
                 };
                 self.active_approval = Some(req.clone());
+                self.set_busy_state(BusyState::ApprovalPending);
                 if let Some(idx) = self.blocks.iter().rposition(
                     |b| matches!(b, DisplayBlock::ToolRunning { call_id: id, .. } if id == call_id),
                 ) {
@@ -590,6 +609,7 @@ impl TuiSessionState {
             }
             AgentEvent::Error { message } => {
                 self.blocks.push(DisplayBlock::ErrorLine(message.clone()));
+                self.set_busy_state(BusyState::Error);
             }
             AgentEvent::Checkpoint { .. } => {}
             AgentEvent::ChildSessionSpawned {
@@ -665,6 +685,9 @@ impl TuiSessionState {
                 self.blocks.push(DisplayBlock::System(format!(
                     "Sub-agent {short}… done: {status}"
                 )));
+            }
+            AgentEvent::BusyStateChanged { state } => {
+                self.set_busy_state(*state);
             }
             _ => {}
         }
