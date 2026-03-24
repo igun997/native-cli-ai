@@ -108,7 +108,7 @@ impl Skill {
         let mut prompt = format!(
             "Use the skill `{}`.\n\nSkill instructions:\n{}\n",
             self.command,
-            self.body.trim()
+            self.expanded_body().trim()
         );
         if !task.trim().is_empty() {
             prompt.push_str(&format!("\nTask:\n{}\n", task.trim()));
@@ -141,6 +141,44 @@ impl Skill {
             SkillSource::AgentsMd => "agents-md",
             SkillSource::FileSystem => "filesystem",
         }
+    }
+
+    /// Return the skill body with referenced supporting files inlined.
+    ///
+    /// Scans the body for file references (./path, @path, backtick-wrapped paths),
+    /// resolves them against the skill's directory, and appends their contents.
+    /// Bare filenames (no `/` or `./` prefix) resolve only against skill directory (Level 1).
+    pub fn expanded_body(&self) -> String {
+        let refs = extract_file_references(&self.body);
+        if refs.is_empty() {
+            return self.body.clone();
+        }
+
+        let mut expanded = self.body.clone();
+        for ref_path in &refs {
+            let clean = ref_path.trim_start_matches("./");
+            let is_bare_filename = !clean.contains('/');
+
+            let resolved = if is_bare_filename {
+                // Pattern 4: bare filenames resolve only against skill directory (Level 1)
+                let candidate = self.directory.join(clean);
+                if candidate.is_file() {
+                    Some(candidate)
+                } else {
+                    None
+                }
+            } else {
+                resolve_skill_reference(ref_path, &self.directory)
+            };
+
+            if let Some(resolved) = resolved
+                && let Ok(content) = std::fs::read_to_string(&resolved)
+            {
+                expanded.push_str(&format!("\n\n===== {} =====\n\n{}", clean, content.trim()));
+            }
+        }
+
+        expanded
     }
 }
 
@@ -394,6 +432,115 @@ fn parse_permission_mode_str(raw: &str) -> Option<PermissionMode> {
     }
 }
 
+/// Resolve a file reference to an absolute path using three-level strategy:
+/// 1. Relative to skill directory
+/// 2. Relative to catalog root (parent of skill directory)
+/// 3. Strip `skills/` prefix and retry against catalog root
+///
+/// Returns `None` if the file doesn't exist at any level.
+fn resolve_skill_reference(reference: &str, skill_directory: &Path) -> Option<PathBuf> {
+    let clean = reference.trim_start_matches("./");
+
+    // Level 1: relative to skill directory
+    let level1 = skill_directory.join(clean);
+    if level1.is_file() {
+        return Some(level1);
+    }
+
+    // Level 2: relative to catalog root (parent of skill directory)
+    if let Some(catalog_root) = skill_directory.parent() {
+        let level2 = catalog_root.join(clean);
+        if level2.is_file() {
+            return Some(level2);
+        }
+
+        // Level 3: strip "skills/" prefix and retry against catalog root
+        if let Some(stripped) = clean.strip_prefix("skills/") {
+            let level3 = catalog_root.join(stripped);
+            if level3.is_file() {
+                return Some(level3);
+            }
+        }
+    }
+
+    None
+}
+
+/// Extract file references from a skill body.
+///
+/// Detects: `./path`, `@path`, backtick-wrapped paths with supported extensions.
+/// Returns deduplicated list in first-occurrence order, with `@` stripped and `./` preserved.
+fn extract_file_references(body: &str) -> Vec<String> {
+    use regex::Regex;
+    use std::collections::HashSet;
+    use std::sync::LazyLock;
+
+    static EXCLUDED_NAMES: &[&str] = &[
+        "CLAUDE.md",
+        "AGENTS.md",
+        "GEMINI.md",
+        "SKILL.md",
+        "README.md",
+        "package.json",
+    ];
+
+    static DOT_SLASH_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\./[a-zA-Z0-9_][a-zA-Z0-9_./-]*\.(md|sh|ts|js|dot|txt|html|cjs)").unwrap()
+    });
+
+    // Require @ at start of line or after whitespace to avoid matching emails
+    static AT_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?:^|\s)@([a-zA-Z0-9_][a-zA-Z0-9_./-]*\.(md|sh|ts|js|dot|txt|html|cjs))")
+            .unwrap()
+    });
+
+    static BACKTICK_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"`([a-zA-Z0-9_][a-zA-Z0-9_./-]*\.(md|sh|ts|js|dot|txt|html|cjs))`").unwrap()
+    });
+
+    fn is_excluded(path: &str) -> bool {
+        EXCLUDED_NAMES.contains(&path)
+            || path.contains("path/to/")
+            || path.starts_with("http://")
+            || path.starts_with("https://")
+    }
+
+    let mut seen = HashSet::new();
+    let mut refs = Vec::new();
+
+    // Pattern 1: ./path references
+    for m in DOT_SLASH_RE.find_iter(body) {
+        let path = m.as_str().to_string();
+        let key = path.trim_start_matches("./").to_string();
+        if !is_excluded(&key) && !seen.contains(&key) {
+            seen.insert(key);
+            refs.push(path);
+        }
+    }
+
+    // Pattern 2: @path references (strip @, require word boundary)
+    for cap in AT_RE.captures_iter(body) {
+        let path = cap[1].to_string();
+        let key = path.clone();
+        if !is_excluded(&key) && !seen.contains(&key) {
+            seen.insert(key);
+            refs.push(path);
+        }
+    }
+
+    // Pattern 3+4: backtick-wrapped paths
+    for cap in BACKTICK_RE.captures_iter(body) {
+        let path = cap[1].to_string();
+        let key = path.trim_start_matches("./").to_string();
+        if !is_excluded(&key) && !EXCLUDED_NAMES.contains(&path.as_str()) && !seen.contains(&key) {
+            seen.insert(key);
+            refs.push(path);
+        }
+    }
+
+    refs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,5 +614,246 @@ Component management and styling...
         let shad = skills.iter().find(|s| s.command == "shadcn-ui").unwrap();
         assert_eq!(shad.context, SkillContextMode::Fork);
         assert_eq!(shad.permission_mode, Some(PermissionMode::Plan));
+    }
+
+    // === extract_file_references tests ===
+
+    #[test]
+    fn extracts_dot_slash_references() {
+        let body = "Read ./implementer-prompt.md for details.\nAlso see ./subdir/helper.sh here.";
+        let refs = extract_file_references(body);
+        assert_eq!(refs, vec!["./implementer-prompt.md", "./subdir/helper.sh"]);
+    }
+
+    #[test]
+    fn extracts_at_prefixed_references() {
+        let body =
+            "Use @testing-anti-patterns.md to avoid pitfalls.\nSee @graphviz-conventions.dot too.";
+        let refs = extract_file_references(body);
+        assert_eq!(
+            refs,
+            vec!["testing-anti-patterns.md", "graphviz-conventions.dot"]
+        );
+    }
+
+    #[test]
+    fn extracts_backtick_paths_with_directory() {
+        let body = "Check `skills/brainstorming/visual-companion.md` for guidance.\nAlso `subdir/file.ts`.";
+        let refs = extract_file_references(body);
+        assert_eq!(
+            refs,
+            vec!["skills/brainstorming/visual-companion.md", "subdir/file.ts"]
+        );
+    }
+
+    #[test]
+    fn extracts_backtick_bare_filenames() {
+        let body = "See `code-reviewer.md` for the template.\nUse `helper.sh` too.";
+        let refs = extract_file_references(body);
+        assert_eq!(refs, vec!["code-reviewer.md", "helper.sh"]);
+    }
+
+    #[test]
+    fn excludes_well_known_files_in_backticks() {
+        let body = "Check `CLAUDE.md` and `AGENTS.md` and `GEMINI.md` and `SKILL.md` and `README.md` and `package.json`.";
+        let refs = extract_file_references(body);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn excludes_urls_and_template_paths() {
+        let body = "See https://example.com/file.md and path/to/test.md for examples.";
+        let refs = extract_file_references(body);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn deduplicates_preserving_order() {
+        let body = "Use ./helper.md first.\nThen `helper.md` again.\nAnd @helper.md once more.";
+        let refs = extract_file_references(body);
+        assert_eq!(refs, vec!["./helper.md"]);
+    }
+
+    // === resolve_skill_reference tests ===
+
+    #[test]
+    fn resolves_reference_in_skill_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("helper.md"), "helper content").unwrap();
+
+        let result = resolve_skill_reference("./helper.md", &skill_dir);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), skill_dir.join("helper.md"));
+    }
+
+    #[test]
+    fn resolves_reference_via_catalog_root_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = dir.path().join("skills");
+        let skill_dir = catalog.join("sdd");
+        let other_skill = catalog.join("brainstorming");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::create_dir_all(&other_skill).unwrap();
+        std::fs::write(other_skill.join("visual.md"), "visual content").unwrap();
+
+        let result = resolve_skill_reference("brainstorming/visual.md", &skill_dir);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), other_skill.join("visual.md"));
+    }
+
+    #[test]
+    fn resolves_skills_prefix_by_stripping() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = dir.path().join("skills");
+        let brainstorming = catalog.join("brainstorming");
+        std::fs::create_dir_all(&brainstorming).unwrap();
+        std::fs::write(brainstorming.join("visual.md"), "content").unwrap();
+
+        let skill_dir = catalog.join("sdd");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        let result = resolve_skill_reference("skills/brainstorming/visual.md", &skill_dir);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), brainstorming.join("visual.md"));
+    }
+
+    #[test]
+    fn returns_none_for_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        let result = resolve_skill_reference("./nonexistent.md", &skill_dir);
+        assert!(result.is_none());
+    }
+
+    // === expanded_body tests ===
+
+    #[test]
+    fn expanded_body_inlines_referenced_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("helper.md"), "Helper content here.").unwrap();
+
+        let skill = Skill {
+            name: "test".into(),
+            description: None,
+            command: "test".into(),
+            model: None,
+            permission_mode: None,
+            context: SkillContextMode::Inline,
+            directory: skill_dir,
+            body: "Main body.\n\nSee ./helper.md for details.".into(),
+            source: SkillSource::FileSystem,
+        };
+
+        let expanded = skill.expanded_body();
+        assert!(expanded.contains("Main body."));
+        assert!(expanded.contains("===== helper.md ====="));
+        assert!(expanded.contains("Helper content here."));
+    }
+
+    #[test]
+    fn expanded_body_skips_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        let skill = Skill {
+            name: "test".into(),
+            description: None,
+            command: "test".into(),
+            model: None,
+            permission_mode: None,
+            context: SkillContextMode::Inline,
+            directory: skill_dir,
+            body: "Main body.\n\nSee ./nonexistent.md for details.".into(),
+            source: SkillSource::FileSystem,
+        };
+
+        let expanded = skill.expanded_body();
+        assert_eq!(expanded, "Main body.\n\nSee ./nonexistent.md for details.");
+    }
+
+    #[test]
+    fn expanded_body_inlines_at_prefixed_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("tdd");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("testing-anti-patterns.md"),
+            "Anti-pattern content.",
+        )
+        .unwrap();
+
+        let skill = Skill {
+            name: "test".into(),
+            description: None,
+            command: "test".into(),
+            model: None,
+            permission_mode: None,
+            context: SkillContextMode::Inline,
+            directory: skill_dir,
+            body: "Main body.\n\nRead @testing-anti-patterns.md to avoid pitfalls.".into(),
+            source: SkillSource::FileSystem,
+        };
+
+        let expanded = skill.expanded_body();
+        assert!(expanded.contains("===== testing-anti-patterns.md ====="));
+        assert!(expanded.contains("Anti-pattern content."));
+    }
+
+    #[test]
+    fn expanded_body_bare_filename_resolves_only_in_skill_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = dir.path().join("skills");
+        let skill_dir = catalog.join("review");
+        let other_dir = catalog.join("other");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::create_dir_all(&other_dir).unwrap();
+        std::fs::write(other_dir.join("template.md"), "Other content.").unwrap();
+
+        let skill = Skill {
+            name: "test".into(),
+            description: None,
+            command: "test".into(),
+            model: None,
+            permission_mode: None,
+            context: SkillContextMode::Inline,
+            directory: skill_dir,
+            body: "See `template.md` for the template.".into(),
+            source: SkillSource::FileSystem,
+        };
+
+        let expanded = skill.expanded_body();
+        assert!(!expanded.contains("====="));
+        assert!(!expanded.contains("Other content."));
+    }
+
+    #[test]
+    fn expanded_body_deduplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("helper.md"), "Helper.").unwrap();
+
+        let skill = Skill {
+            name: "test".into(),
+            description: None,
+            command: "test".into(),
+            model: None,
+            permission_mode: None,
+            context: SkillContextMode::Inline,
+            directory: skill_dir,
+            body: "See ./helper.md and `helper.md` again.".into(),
+            source: SkillSource::FileSystem,
+        };
+
+        let expanded = skill.expanded_body();
+        let count = expanded.matches("===== helper.md =====").count();
+        assert_eq!(count, 1);
     }
 }
