@@ -112,6 +112,10 @@ impl AgentLoop {
         let mut empty_retries = 0_u32;
         let mut attachments_cleaned = attachments.is_empty();
         const MAX_EMPTY_RETRIES: u32 = 2;
+        // Consecutive failures of the same tool — stops infinite retry loops.
+        let mut consecutive_tool_failures: u32 = 0;
+        let mut last_failed_tool: String = String::new();
+        const MAX_CONSECUTIVE_TOOL_FAILURES: u32 = 3;
 
         let final_text = loop {
             if self.is_cancelled() {
@@ -475,6 +479,23 @@ impl AgentLoop {
                 .await;
             }
 
+            // Track consecutive failures of the same tool to detect infinite retry loops.
+            let all_failed_same_tool = !final_results.is_empty()
+                && final_results.iter().all(|r| !r.success)
+                && tool_calls.len() == 1;
+            if all_failed_same_tool {
+                let tool_name = &tool_calls[0].name;
+                if *tool_name == last_failed_tool {
+                    consecutive_tool_failures += 1;
+                } else {
+                    last_failed_tool = tool_name.clone();
+                    consecutive_tool_failures = 1;
+                }
+            } else {
+                consecutive_tool_failures = 0;
+                last_failed_tool.clear();
+            }
+
             for result in final_results {
                 self.messages.push(Message::tool(
                     result.call_id.clone(),
@@ -485,6 +506,18 @@ impl AgentLoop {
                     output: result,
                 })
                 .await;
+            }
+
+            if consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES {
+                let msg = format!(
+                    "Tool `{}` failed {} times consecutively — stopping to avoid infinite loop.",
+                    last_failed_tool, consecutive_tool_failures
+                );
+                self.emit(AgentEvent::Error {
+                    message: msg.clone(),
+                })
+                .await;
+                break msg;
             }
         };
 
