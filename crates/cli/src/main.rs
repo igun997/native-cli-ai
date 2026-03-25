@@ -200,9 +200,13 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Manage skills: list, add, remove, update
     Skills {
+        /// Output as JSON (shorthand for `nca skills list --json`)
         #[arg(long)]
         json: bool,
+        #[command(subcommand)]
+        command: Option<SkillsCommand>,
     },
     Mcp {
         #[arg(long)]
@@ -288,6 +292,39 @@ enum MemoryCommand {
         text: String,
         #[arg(long, default_value = "note")]
         kind: String,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum SkillsCommand {
+    /// List installed skills
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install skills from a GitHub repo or local path
+    Add {
+        /// Source: owner/repo, GitHub URL, or local path
+        source: String,
+        /// Install specific skills by name (default: all)
+        #[arg(short, long)]
+        skill: Vec<String>,
+        /// Install to ~/.nca/skills/ instead of .nca/skills/
+        #[arg(short, long)]
+        global: bool,
+    },
+    /// Remove an installed skill
+    Remove {
+        /// Skill command name to remove
+        name: String,
+        /// Remove from ~/.nca/skills/ instead of .nca/skills/
+        #[arg(short, long)]
+        global: bool,
+    },
+    /// Update installed skills from their source
+    Update {
+        /// Specific skill to update (default: all)
+        name: Option<String>,
     },
 }
 
@@ -505,9 +542,27 @@ async fn try_main() -> anyhow::Result<()> {
         Some(Command::Cancel { session_id, json }) => {
             cancel_session(&config, &workspace_root, &session_id, json).await?;
         }
-        Some(Command::Skills { json }) => {
-            list_skills(&config, &workspace_root, json)?;
-        }
+        Some(Command::Skills { json, command }) => match command {
+            None => {
+                list_skills(&config, &workspace_root, json)?;
+            }
+            Some(SkillsCommand::List { json: j }) => {
+                list_skills(&config, &workspace_root, j || json)?;
+            }
+            Some(SkillsCommand::Add {
+                source,
+                skill,
+                global,
+            }) => {
+                handle_skills_add(&source, &skill, global, &workspace_root)?;
+            }
+            Some(SkillsCommand::Remove { name, global }) => {
+                handle_skills_remove(&name, global, &workspace_root)?;
+            }
+            Some(SkillsCommand::Update { name }) => {
+                handle_skills_update(name.as_deref(), &workspace_root)?;
+            }
+        },
         Some(Command::Mcp { json }) => {
             list_mcp_servers(&config, json)?;
         }
@@ -1271,6 +1326,120 @@ fn list_skills(config: &NcaConfig, workspace_root: &Path, json: bool) -> anyhow:
             println!("{}", skill.summary_line());
         }
     }
+    Ok(())
+}
+
+fn handle_skills_add(
+    source: &str,
+    skill_filter: &[String],
+    global: bool,
+    workspace_root: &Path,
+) -> anyhow::Result<()> {
+    use nca_core::skill_installer::{install_skills, parse_source};
+
+    let parsed = parse_source(source).map_err(anyhow::Error::msg)?;
+    let installed = install_skills(&parsed, skill_filter, global, workspace_root)
+        .map_err(anyhow::Error::msg)?;
+
+    let scope = if global { "(global)" } else { "(local)" };
+    println!(
+        "Installed {} skill(s) {scope}: {}",
+        installed.len(),
+        installed.join(", ")
+    );
+    Ok(())
+}
+
+fn handle_skills_remove(name: &str, global: bool, workspace_root: &Path) -> anyhow::Result<()> {
+    use nca_core::skill_installer::remove_skill;
+
+    remove_skill(name, global, workspace_root).map_err(anyhow::Error::msg)?;
+    println!("Removed skill: {name}");
+    Ok(())
+}
+
+fn handle_skills_update(name: Option<&str>, workspace_root: &Path) -> anyhow::Result<()> {
+    use nca_core::skill_installer::{
+        SkillLock, SkillLockEntry, copy_skill_dir, discover_skills_in_dir, git_clone_to_temp,
+        git_head_commit, lock_file_path, skills_dir,
+    };
+
+    let mut updated = 0u32;
+    let mut up_to_date = 0u32;
+    let mut skipped = 0u32;
+
+    for global in [false, true] {
+        let lock_path = lock_file_path(global, workspace_root);
+        let mut lock = SkillLock::load(&lock_path).map_err(anyhow::Error::msg)?;
+        let target = skills_dir(global, workspace_root);
+        let mut changed = false;
+
+        let entries: Vec<_> = lock
+            .skills
+            .iter()
+            .filter(|(k, _)| name.is_none() || name == Some(k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        for (skill_name, entry) in entries {
+            if entry.commit.is_none() {
+                eprintln!("Skipping '{skill_name}' (installed from local path)");
+                skipped += 1;
+                continue;
+            }
+
+            let clone_url = entry
+                .source
+                .strip_prefix("github:")
+                .map(|repo| format!("https://github.com/{repo}.git"));
+
+            let Some(url) = clone_url else {
+                eprintln!("Skipping '{skill_name}' (unknown source format)");
+                skipped += 1;
+                continue;
+            };
+
+            let tmp = git_clone_to_temp(&url).map_err(anyhow::Error::msg)?;
+            let new_commit = git_head_commit(tmp.path()).ok();
+
+            if new_commit.as_deref() == entry.commit.as_deref() {
+                up_to_date += 1;
+                continue;
+            }
+
+            let skills_path = if tmp.path().join("skills").is_dir() {
+                tmp.path().join("skills")
+            } else {
+                tmp.path().to_path_buf()
+            };
+
+            let discovered = discover_skills_in_dir(&skills_path).map_err(anyhow::Error::msg)?;
+
+            if let Some((_, src_dir)) = discovered.iter().find(|(n, _)| n == &skill_name) {
+                let dest = target.join(&skill_name);
+                copy_skill_dir(src_dir, &dest).map_err(anyhow::Error::msg)?;
+                lock.upsert(
+                    &skill_name,
+                    SkillLockEntry {
+                        source: entry.source.clone(),
+                        commit: new_commit,
+                        installed_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                );
+                changed = true;
+                updated += 1;
+            } else {
+                eprintln!("Warning: skill '{skill_name}' no longer found in source repo");
+                skipped += 1;
+            }
+        }
+
+        if changed {
+            lock.save(&lock_path).map_err(anyhow::Error::msg)?;
+        }
+    }
+
+    println!("Updated {updated}, already up-to-date {up_to_date}, skipped {skipped}");
     Ok(())
 }
 
