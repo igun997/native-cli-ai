@@ -157,6 +157,12 @@ impl Skill {
         let mut expanded = self.body.clone();
         for ref_path in &refs {
             let clean = ref_path.trim_start_matches("./");
+
+            // Block directory traversal
+            if clean.contains("..") {
+                continue;
+            }
+
             let is_bare_filename = !clean.contains('/');
 
             let resolved = if is_bare_filename {
@@ -438,8 +444,14 @@ fn parse_permission_mode_str(raw: &str) -> Option<PermissionMode> {
 /// 3. Strip `skills/` prefix and retry against catalog root
 ///
 /// Returns `None` if the file doesn't exist at any level.
+/// Rejects paths containing `..` to prevent directory traversal.
 fn resolve_skill_reference(reference: &str, skill_directory: &Path) -> Option<PathBuf> {
     let clean = reference.trim_start_matches("./");
+
+    // Block directory traversal
+    if clean.contains("..") {
+        return None;
+    }
 
     // Level 1: relative to skill directory
     let level1 = skill_directory.join(clean);
@@ -448,17 +460,35 @@ fn resolve_skill_reference(reference: &str, skill_directory: &Path) -> Option<Pa
     }
 
     // Level 2: relative to catalog root (parent of skill directory)
+    // Only for filesystem skills (not AGENTS.md skills whose directory is workspace root).
+    // We detect this by checking if skill_directory has a parent that is different
+    // from the directory itself (AGENTS.md skills use workspace_root directly).
     if let Some(catalog_root) = skill_directory.parent() {
-        let level2 = catalog_root.join(clean);
-        if level2.is_file() {
-            return Some(level2);
-        }
+        // Skip Level 2/3 if skill_directory looks like a workspace root
+        // (i.e., it doesn't have a "skills"-like parent structure).
+        // Filesystem skills are always nested: <catalog_root>/<skill_name>/SKILL.md
+        // AGENTS.md skills have directory == workspace_root, so parent is workspace parent.
+        let skill_dir_name = skill_directory
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        let is_likely_skill_subdir =
+            !skill_dir_name.is_empty() && skill_dir_name != "." && skill_directory != catalog_root;
 
-        // Level 3: strip "skills/" prefix and retry against catalog root
-        if let Some(stripped) = clean.strip_prefix("skills/") {
-            let level3 = catalog_root.join(stripped);
-            if level3.is_file() {
-                return Some(level3);
+        if is_likely_skill_subdir {
+            let level2 = catalog_root.join(clean);
+            if level2.is_file() {
+                return Some(level2);
+            }
+
+            // Level 3: strip "skills/" prefix and retry against catalog root
+            if let Some(stripped) = clean.strip_prefix("skills/")
+                && !stripped.contains("..")
+            {
+                let level3 = catalog_root.join(stripped);
+                if level3.is_file() {
+                    return Some(level3);
+                }
             }
         }
     }
@@ -726,6 +756,18 @@ Component management and styling...
         std::fs::create_dir_all(&skill_dir).unwrap();
 
         let result = resolve_skill_reference("./nonexistent.md", &skill_dir);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn rejects_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        // Create a file in the parent that should NOT be reachable
+        std::fs::write(dir.path().join("secret.md"), "secret content").unwrap();
+
+        let result = resolve_skill_reference("../secret.md", &skill_dir);
         assert!(result.is_none());
     }
 

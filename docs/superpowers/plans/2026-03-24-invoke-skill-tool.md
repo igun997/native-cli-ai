@@ -1,3 +1,27 @@
+# Invoke Skill Tool Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Add an `invoke_skill` tool that the LLM can call to dynamically load a skill's full instructions.
+
+**Architecture:** Create a new `InvokeSkillTool` struct implementing `ToolExecutor`, register it post-construction in `supervisor.rs` (for both safe and full modes), and update the system prompt footer to tell the LLM to use the tool.
+
+**Tech Stack:** Rust, async-trait
+
+**Spec:** `docs/superpowers/specs/2026-03-24-invoke-skill-tool-design.md`
+
+---
+
+### Task 1: Create `invoke_skill.rs` tool implementation
+
+**Files:**
+- Create: `crates/core/src/tools/invoke_skill.rs`
+
+- [ ] **Step 1: Create the tool file with struct and constructor**
+
+Create `crates/core/src/tools/invoke_skill.rs`:
+
+```rust
 //! Tool that lets the LLM load a skill's full instructions by name.
 
 use crate::skills::SkillCatalog;
@@ -96,7 +120,131 @@ impl ToolExecutor for InvokeSkillTool {
         }
     }
 }
+```
 
+- [ ] **Step 2: Verify it compiles**
+
+Run: `cargo check -p nca-core 2>&1 | tail -5`
+Expected: may warn about dead code (not registered yet), but no errors
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add crates/core/src/tools/invoke_skill.rs
+git commit -m "feat: add invoke_skill tool implementation (#34)"
+```
+
+---
+
+### Task 2: Export module and register the tool
+
+**Files:**
+- Modify: `crates/core/src/tools/mod.rs:1-23` (add module and re-export)
+- Modify: `crates/runtime/src/supervisor.rs:148-155` (register tool)
+
+- [ ] **Step 1: Add module declaration and re-export in `mod.rs`**
+
+In `crates/core/src/tools/mod.rs`, add after `pub mod ask_question;` (line 2):
+
+```rust
+pub mod invoke_skill;
+```
+
+And after `pub use ask_question::AskQuestionTool;` (line 23), add:
+
+```rust
+pub use invoke_skill::InvokeSkillTool;
+```
+
+- [ ] **Step 2: Register `InvokeSkillTool` in `supervisor.rs`**
+
+In `crates/runtime/src/supervisor.rs`, add the import at the top (after the existing `use nca_core::tools::AskQuestionTool;` on line 20):
+
+```rust
+use nca_core::tools::InvokeSkillTool;
+```
+
+Then add the registration after the `AskQuestionTool` block (after line 183), following the same post-construction pattern:
+
+```rust
+tools.register(Box::new(InvokeSkillTool::new(
+    workspace_root.clone(),
+    config.harness.skill_directories.clone(),
+)));
+```
+
+Note: `config.harness.skill_directories` is a `Vec<PathBuf>` field on `NcaConfig.harness` — the same field used by `build_system_prompt` in `harness.rs`. This registers in both safe and full modes since the tool is read-only.
+
+- [ ] **Step 3: Verify it compiles**
+
+Run: `cargo check -p nca-runtime 2>&1 | tail -5`
+Expected: no errors
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add crates/core/src/tools/mod.rs crates/runtime/src/supervisor.rs
+git commit -m "feat: register invoke_skill tool in supervisor (#34)"
+```
+
+---
+
+### Task 3: Update system prompt skills footer
+
+**Files:**
+- Modify: `crates/core/src/harness.rs:144-146`
+
+- [ ] **Step 1: Update the footer text**
+
+In `crates/core/src/harness.rs`, change line 144-146 from:
+
+```rust
+    section.push_str(
+        "\nUse these skill summaries when relevant. Full skill instructions are loaded only when explicitly invoked by the user or REPL.",
+    );
+```
+
+To:
+
+```rust
+    section.push_str(
+        "\nUse the invoke_skill tool to load full instructions when a task matches a skill.",
+    );
+```
+
+- [ ] **Step 2: Search for any test asserting the old footer string**
+
+Run: `grep -n "explicitly invoked\|Full skill instructions" crates/core/src/harness.rs`
+
+If any test asserts the old footer text, update it to match the new string. The `layers_sections_in_stable_order` test only asserts `"Available Skills:"` (section header), which is unchanged. But verify no other assertion references the old footer.
+
+Then run: `cargo test -p nca-core layers_sections 2>&1 | tail -10`
+Expected: PASS
+
+- [ ] **Step 3: Verify full build**
+
+Run: `cargo check --workspace 2>&1 | tail -5`
+Expected: no errors
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add crates/core/src/harness.rs
+git commit -m "feat: update skills manifest footer to reference invoke_skill tool (#34)"
+```
+
+---
+
+### Task 4: Add tests for invoke_skill tool
+
+**Files:**
+- Modify: `crates/core/src/tools/invoke_skill.rs` (add test module)
+
+- [ ] **Step 1: Add test module to `invoke_skill.rs`**
+
+Append to the end of `crates/core/src/tools/invoke_skill.rs`:
+
+```rust
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,12 +272,10 @@ mod tests {
         assert_eq!(def.name, "invoke_skill");
         assert!(def.description.contains("Load a skill"));
         assert!(def.parameters["properties"]["skill_name"].is_object());
-        assert!(
-            def.parameters["required"]
-                .as_array()
-                .unwrap()
-                .contains(&serde_json::json!("skill_name"))
-        );
+        assert!(def.parameters["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("skill_name")));
     }
 
     #[tokio::test]
@@ -184,3 +330,36 @@ mod tests {
         assert!(result.error.unwrap().contains("skill_name is required"));
     }
 }
+```
+
+- [ ] **Step 2: Run tests**
+
+Run: `cargo test -p nca-core invoke_skill 2>&1 | tail -20`
+Expected: all 4 tests pass
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add crates/core/src/tools/invoke_skill.rs
+git commit -m "test: add invoke_skill tool tests (#34)"
+```
+
+---
+
+### Task 5: Full build and test verification
+
+- [ ] **Step 1: Run all workspace tests**
+
+Run: `cargo test --workspace 2>&1 | tail -30`
+Expected: all tests pass
+
+- [ ] **Step 2: Run clippy**
+
+Run: `cargo clippy --workspace -- -D warnings 2>&1 | tail -10`
+Expected: no warnings
+
+- [ ] **Step 3: Commit if any cleanup needed**
+
+```bash
+git add -A && git commit -m "chore: invoke_skill tool - final verification (#34)"
+```

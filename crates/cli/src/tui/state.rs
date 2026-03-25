@@ -679,7 +679,7 @@ impl TuiSessionState {
                     row.phase = phase.clone();
                     row.detail = d.clone();
                     row.running = true;
-                    if phase == "skill" {
+                    if phase == "skill" || phase == "invoke_skill" {
                         row.skill = Some(detail.clone());
                     }
                 } else {
@@ -689,7 +689,7 @@ impl TuiSessionState {
                         phase: phase.clone(),
                         detail: d.clone(),
                         running: true,
-                        skill: if phase == "skill" {
+                        skill: if phase == "skill" || phase == "invoke_skill" {
                             Some(detail.clone())
                         } else {
                             None
