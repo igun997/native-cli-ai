@@ -7,6 +7,26 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tokio::process::Command;
 
+fn sanitize_git_env(cmd: &mut Command) -> &mut Command {
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_PREFIX",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_CONFIG",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    ] {
+        cmd.env_remove(key);
+    }
+    cmd
+}
+
 /// Git manager for autonomous research workflows
 pub struct GitManager {
     repo_path: PathBuf,
@@ -22,7 +42,9 @@ impl GitManager {
 
     /// Run a git command and return the output
     async fn run(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("git")
+        let mut cmd = Command::new("git");
+        sanitize_git_env(&mut cmd);
+        let output = cmd
             .current_dir(&self.repo_path)
             .args(args)
             .output()
@@ -294,21 +316,35 @@ mod tests {
         let temp = TempDir::new()?;
 
         // Initialize git repo
-        Command::new("git")
-            .current_dir(temp.path())
+        let mut init = Command::new("git");
+        sanitize_git_env(&mut init);
+        init.current_dir(temp.path())
             .args(["init"])
             .output()
             .await
             .expect("git init failed");
 
-        Command::new("git")
+        let mut config_hooks = Command::new("git");
+        sanitize_git_env(&mut config_hooks);
+        config_hooks
+            .current_dir(temp.path())
+            .args(["config", "core.hooksPath", "/dev/null"])
+            .output()
+            .await
+            .expect("git config failed");
+
+        let mut config_email = Command::new("git");
+        sanitize_git_env(&mut config_email);
+        config_email
             .current_dir(temp.path())
             .args(["config", "user.email", "test@test.com"])
             .output()
             .await
             .expect("git config failed");
 
-        Command::new("git")
+        let mut config_name = Command::new("git");
+        sanitize_git_env(&mut config_name);
+        config_name
             .current_dir(temp.path())
             .args(["config", "user.name", "Test"])
             .output()
@@ -316,7 +352,9 @@ mod tests {
             .expect("git config failed");
 
         // Add an initial commit so HEAD is valid
-        Command::new("git")
+        let mut initial_commit = Command::new("git");
+        sanitize_git_env(&mut initial_commit);
+        initial_commit
             .current_dir(temp.path())
             .args(["commit", "--allow-empty", "-m", "initial"])
             .output()
