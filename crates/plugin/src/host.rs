@@ -108,7 +108,7 @@ struct HostState {
     name: String,
     config: BTreeMap<String, String>,
     allowed_env: Vec<String>,
-    allowed_hosts: Vec<String>,
+    allowed_hosts: Option<Vec<String>>,
     next: Option<Arc<Node>>,
     defaults: Defaults,
 }
@@ -155,7 +155,7 @@ impl wit_host::Host for HostState {
         headers: Vec<(String, String)>,
         body: Option<Vec<u8>>,
     ) -> Result<wit_host::HttpResponse, String> {
-        http_request(&self.allowed_hosts, &method, &url, headers, body)
+        http_request(self.allowed_hosts.as_deref(), &method, &url, headers, body)
     }
 
     fn next_credential(&mut self, provider: String) -> Result<Option<wit::Credential>, String> {
@@ -182,7 +182,7 @@ impl wit_host::Host for HostState {
 }
 
 fn http_request(
-    allowed: &[String],
+    allowed: Option<&[String]>,
     method: &str,
     url: &str,
     headers: Vec<(String, String)>,
@@ -193,7 +193,9 @@ fn http_request(
         return Err(format!("scheme `{}` is not allowed", parsed.scheme()));
     }
     let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
-    if !allowed.iter().any(|h| h.eq_ignore_ascii_case(&host)) {
+    if let Some(allowed) = allowed
+        && !allowed.iter().any(|h| h.eq_ignore_ascii_case(&host))
+    {
         return Err(format!(
             "network access to `{host}` is not granted by the plugin manifest"
         ));
@@ -248,10 +250,10 @@ pub(crate) struct Node {
 }
 
 impl Node {
-    fn call<R>(
+    fn call<R: Send>(
         &self,
         defaults: &Defaults,
-        f: impl FnOnce(&mut Bindings, &mut Store<HostState>) -> wasmtime::Result<R>,
+        f: impl FnOnce(&mut Bindings, &mut Store<HostState>) -> wasmtime::Result<R> + Send,
     ) -> Result<R, PluginError> {
         let mut guard = self
             .instance
@@ -260,7 +262,20 @@ impl Node {
         let Instance { store, bindings } = &mut *guard;
         store.data_mut().defaults = defaults.clone();
         store.set_epoch_deadline((CALL_TIMEOUT.as_millis() / EPOCH_TICK.as_millis()) as u64);
-        f(bindings, store).map_err(|e| rt_err(&self.name, e))
+        // wasmtime-wasi blocks on its own runtime for filesystem access, which panics if
+        // the current thread is already driving a tokio runtime. Run the guest on a
+        // plain scoped thread in that case.
+        let out = if tokio::runtime::Handle::try_current().is_ok() {
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| f(bindings, store))
+                    .join()
+                    .unwrap_or_else(|_| Err(wasmtime::Error::msg("plugin call panicked")))
+            })
+        } else {
+            f(bindings, store)
+        };
+        out.map_err(|e| rt_err(&self.name, e))
     }
 }
 
@@ -469,13 +484,15 @@ impl PluginSet {
 }
 
 fn expand_path(raw: &str, data_dir: &Path, workspace: &Path) -> Result<PathBuf, PluginError> {
+    let home = std::env::var("HOME").unwrap_or_default();
     let expanded = raw
+        .replace("$HOME", &home)
         .replace("$NCA_PLUGIN_DATA", &data_dir.to_string_lossy())
         .replace("$WORKSPACE", &workspace.to_string_lossy());
     let path = PathBuf::from(expanded);
     if !path.is_absolute() {
         return Err(PluginError::Manifest(format!(
-            "capability path `{raw}` must be absolute or start with $NCA_PLUGIN_DATA / $WORKSPACE"
+            "capability path `{raw}` must be absolute or start with $HOME / $NCA_PLUGIN_DATA / $WORKSPACE"
         )));
     }
     Ok(path)
@@ -606,7 +623,7 @@ impl From<SpawnDecision> for wit::SpawnDecision {
 
 #[cfg(test)]
 pub(crate) fn http_request_for_test(
-    allowed: &[String],
+    allowed: Option<&[String]>,
     method: &str,
     url: &str,
 ) -> Result<(), String> {
